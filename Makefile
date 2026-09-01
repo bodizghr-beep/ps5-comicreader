@@ -34,6 +34,18 @@ SRCS := \
 WARN        := -Wall -Wextra -Wno-unused-parameter
 BASE_CFLAGS := $(WARN) -O2 -I$(SRCDIR)
 
+# Host build i testovi: zaglavlja iz lokalnog roota (scripts/host_deps.sh),
+# linkovanje na sistemske runtime biblioteke preko simlinkova u tom rootu.
+# Sistem nema -dev pakete ni root pristup, pa pkg-config za libarchive otpada.
+HOSTROOT  ?= $(HOME)/.cache/ps5cr-hostdeps
+HOST_LIBDIR := $(HOSTROOT)/root/usr/lib/x86_64-linux-gnu
+HOST_INC  := -I$(HOSTROOT)/root/usr/include \
+             -I$(HOSTROOT)/root/usr/include/libxml2 \
+             -I$(HOSTROOT)/root/usr/include/x86_64-linux-gnu
+HOST_LIBS := -L$(HOSTROOT)/root/usr/lib -L$(HOST_LIBDIR) \
+             -Wl,-rpath,$(HOST_LIBDIR) \
+             -larchive -lxml2 -lcurl -lSDL2
+
 ifdef WITH_PDF
 BASE_CFLAGS += -DHAVE_MUPDF
 PDF_LIBS    := -lmupdf -lmupdf-third
@@ -44,8 +56,8 @@ ifeq ($(HAS_WEBP),1)
 BASE_CFLAGS += -DHAVE_WEBP
 WEBP_PKG   := libwebp
 endif
-PKG_CFLAGS := $(shell pkg-config --cflags sdl2 libarchive $(WEBP_PKG) 2>/dev/null)
-PKG_LIBS   := $(shell pkg-config --libs sdl2 libarchive $(WEBP_PKG) 2>/dev/null)
+PKG_CFLAGS := $(shell pkg-config --cflags $(WEBP_PKG) 2>/dev/null) $(HOST_INC)
+PKG_LIBS   := $(shell pkg-config --libs $(WEBP_PKG) 2>/dev/null) $(HOST_LIBS)
 
 # ======================================================================
 # Testovi i host build ne diraju PS5 SDK.

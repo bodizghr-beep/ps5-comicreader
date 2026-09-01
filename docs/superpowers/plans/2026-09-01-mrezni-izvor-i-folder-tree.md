@@ -75,7 +75,10 @@ Kreiraj `scripts/host_deps.sh`:
 set -e
 
 HOSTROOT="${HOSTROOT:-$HOME/.cache/ps5cr-hostdeps}"
-PKGS="libarchive-dev libxml2-dev libcurl4-openssl-dev"
+# SDL2 ide i kao -dev i kao runtime: na ovom hostu nema nijednog od njih,
+# a host build bez SDL2 ne postoji. libsdl2-2.0-0 je samo alternatives
+# omotac - pravi .so nosi libsdl2-classic.
+PKGS="libarchive-dev libxml2-dev libcurl4-openssl-dev libsdl2-dev libsdl2-2.0-0 libsdl2-classic"
 
 mkdir -p "$HOSTROOT/debs" "$HOSTROOT/root/usr/lib"
 cd "$HOSTROOT/debs"
@@ -146,8 +149,8 @@ Zamijeni postojeće `PKG_CFLAGS` / `PKG_LIBS` korištenje u `host` i `test` cilj
 `libarchive` više ne ide kroz `pkg-config` (SDL2 i libwebp ostaju kako jesu):
 
 ```make
-PKG_CFLAGS := $(shell pkg-config --cflags sdl2 $(WEBP_PKG) 2>/dev/null) $(HOST_INC)
-PKG_LIBS   := $(shell pkg-config --libs sdl2 $(WEBP_PKG) 2>/dev/null) $(HOST_LIBS)
+PKG_CFLAGS := $(shell pkg-config --cflags $(WEBP_PKG) 2>/dev/null) $(HOST_INC)
+PKG_LIBS   := $(shell pkg-config --libs $(WEBP_PKG) 2>/dev/null) $(HOST_LIBS)
 ```
 
 - [ ] **Step 4: Provjeri da host build i dalje prolazi**
