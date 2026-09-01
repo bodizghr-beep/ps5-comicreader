@@ -1,201 +1,315 @@
-/* library.c */
+/* library.c - navigacijski stek
+ *
+ * Dubina 0 je sinteticki nivo sa spiskom izvora. Ulazak u izvor je isto
+ * sto i ulazak u folder, pa UI ne poznaje pojam "izvora".
+ */
 #include "library.h"
+#include "config.h"
 #include "common.h"
-#include "doc.h"
 
-#include <dirent.h>
 #include <sys/stat.h>
 
-#define MAX_DEPTH  5
 #define STATE_FILE ".ps5cr_state"
+#define USB_SLOTS  8
 
-/* PS5 montira USB uredjaje na /mnt/usbN. Nema garancije da je bas usb0,
- * pa se prolazi kroz sve moguce indekse. */
-#define USB_SLOTS 8
-
-static void lib_push(library_t *lib, int *cap, const char *path)
+static void level_clear(lib_level_t *lv)
 {
-    if (lib->count == *cap) {
-        int         ncap = *cap ? *cap * 2 : 64;
-        lib_item_t *ni   = realloc(lib->items, (size_t)ncap * sizeof(lib_item_t));
-        if (!ni)
-            return;
-        lib->items = ni;
-        *cap       = ncap;
-    }
-
-    lib_item_t *it = &lib->items[lib->count];
-    snprintf(it->path, sizeof(it->path), "%s", path);
-    it->last_page = -1;
-
-    /* Naslov = ime fajla bez ekstenzije. */
-    snprintf(it->title, sizeof(it->title), "%s", path_base(path));
-    char *dot = strrchr(it->title, '.');
-    if (dot)
-        *dot = '\0';
-
-    lib->count++;
+    free(lv->entries);
+    lv->entries = NULL;
+    lv->count   = 0;
+    lv->err[0]  = '\0';
 }
 
-static void scan_dir(library_t *lib, int *cap, const char *dir, int depth)
+/* Korijen: po jedan red za svaki izvor. */
+static void build_root(library_t *l)
 {
-    if (depth > MAX_DEPTH)
+    lib_level_t *lv = &l->stack[0];
+
+    level_clear(lv);
+    lv->src     = NULL;
+    lv->path[0] = '\0';
+    snprintf(lv->title, sizeof lv->title, "/");
+
+    if (l->n_sources == 0)
         return;
 
-    DIR *dp = opendir(dir);
-    if (!dp)
+    lv->entries = calloc((size_t)l->n_sources, sizeof *lv->entries);
+    if (!lv->entries)
         return;
 
-    struct dirent *de;
-    char           child[LIB_PATH_MAX];
+    for (int i = 0; i < l->n_sources; i++) {
+        lib_entry_t *e = &lv->entries[i];
+        snprintf(e->name, sizeof e->name, "%s", l->sources[i]->name);
+        snprintf(e->path, sizeof e->path, "%s", l->sources[i]->root);
+        e->is_dir    = 1;
+        e->last_page = -1;
+    }
+    lv->count = l->n_sources;
+}
 
-    while ((de = readdir(dp)) != NULL) {
-        if (de->d_name[0] == '.')
-            continue;
+void library_reset(library_t *l)
+{
+    memset(l, 0, sizeof *l);
+    build_root(l);
+}
 
-        int n = snprintf(child, sizeof(child), "%s/%s", dir, de->d_name);
-        if (n < 0 || n >= (int)sizeof(child))
-            continue;
+int library_add_source(library_t *l, source_t *s)
+{
+    if (!s)
+        return -1;
+    if (l->n_sources >= LIB_SRC_MAX) {
+        ERR("previse izvora, %s ignorisan", s->name);
+        source_free(s);
+        return -1;
+    }
+    l->sources[l->n_sources++] = s;
+    build_root(l);
+    return 0;
+}
 
-        /* d_type nije pouzdan na svim FS-ovima, pa se pada na stat(). */
-        int is_dir = 0, is_reg = 0;
-        if (de->d_type == DT_DIR) {
-            is_dir = 1;
-        } else if (de->d_type == DT_REG) {
-            is_reg = 1;
-        } else {
+lib_level_t *library_cur(library_t *l)
+{
+    return &l->stack[l->depth];
+}
+
+/* Popunjava last_page iz ucitanog stanja. */
+static void stamp_state(library_t *l, lib_level_t *lv)
+{
+    for (int i = 0; i < lv->count; i++)
+        if (!lv->entries[i].is_dir)
+            lv->entries[i].last_page = state_page_for(l, lv->entries[i].path);
+}
+
+int library_enter(library_t *l, int index)
+{
+    lib_level_t *cur = library_cur(l);
+
+    if (index < 0 || index >= cur->count)
+        return -1;
+    if (!cur->entries[index].is_dir)
+        return -1;
+
+    if (l->depth + 1 >= LIB_DEPTH_MAX) {
+        LOG("stek dubine %d je pun, ulazak odbijen", LIB_DEPTH_MAX);
+        return -1;
+    }
+
+    source_t   *src = (l->depth == 0) ? l->sources[index] : cur->src;
+    const char *p   = cur->entries[index].path;
+    const char *nm  = cur->entries[index].name;
+
+    lib_level_t *nx = &l->stack[l->depth + 1];
+    level_clear(nx);
+    nx->src    = src;
+    nx->sel    = 0;
+    nx->scroll = 0;
+    snprintf(nx->path,  sizeof nx->path,  "%s", p);
+    snprintf(nx->title, sizeof nx->title, "%s", nm);
+
+    if (src->be->list(src, p, &nx->entries, &nx->count) != 0) {
+        nx->entries = NULL;
+        nx->count   = 0;
+        snprintf(nx->err, sizeof nx->err, "%s",
+                 src->err[0] ? src->err : "listanje nije uspjelo");
+    } else {
+        stamp_state(l, nx);
+    }
+
+    l->depth++;
+    return 0;
+}
+
+int library_back(library_t *l)
+{
+    if (l->depth == 0)
+        return 0;
+
+    level_clear(&l->stack[l->depth]);
+    l->depth--;
+    return 1;
+}
+
+void library_breadcrumb(const library_t *l, char *buf, size_t len)
+{
+    if (l->depth == 0) {
+        snprintf(buf, len, "/");
+        return;
+    }
+
+    size_t o = 0;
+    buf[0] = '\0';
+    for (int i = 1; i <= l->depth; i++) {
+        int w = snprintf(buf + o, len - o, "%s/", l->stack[i].title);
+        if (w < 0 || (size_t)w >= len - o)
+            break;
+        o += (size_t)w;
+    }
+}
+
+int library_init(library_t *l)
+{
+    library_reset(l);
+
+    /* Host build: CR_ROOT zamjenjuje /mnt/usbN. */
+    const char *ovr = getenv("CR_ROOT");
+    if (ovr && *ovr) {
+        snprintf(l->root, sizeof l->root, "%s", ovr);
+        library_add_source(l, source_usb_new(ovr));
+    } else {
+        for (int i = 0; i < USB_SLOTS; i++) {
+            char        p[LIB_PATH_MAX];
             struct stat st;
-            if (stat(child, &st) == 0) {
-                is_dir = S_ISDIR(st.st_mode);
-                is_reg = S_ISREG(st.st_mode);
-            }
+
+            snprintf(p, sizeof p, "/mnt/usb%d", i);
+            if (stat(p, &st) != 0 || !S_ISDIR(st.st_mode))
+                continue;
+            if (!l->root[0])
+                snprintf(l->root, sizeof l->root, "%s", p);
+            library_add_source(l, source_usb_new(p));
         }
-
-        if (is_dir)
-            scan_dir(lib, cap, child, depth + 1);
-        else if (is_reg && doc_is_supported(child))
-            lib_push(lib, cap, child);
     }
 
-    closedir(dp);
-}
-
-static int item_sort_cb(const void *a, const void *b)
-{
-    return natural_cmp(((const lib_item_t *)a)->title, ((const lib_item_t *)b)->title);
-}
-
-int library_scan(library_t *lib)
-{
-    int cap = 0;
-
-    memset(lib, 0, sizeof(*lib));
-
-    /* Na PC build-u nema /mnt/usbN, pa se koren moze zadati promenljivom
-     * okruzenja. Na konzoli se ova grana nikad ne aktivira. */
-    const char *override = getenv("CR_ROOT");
-    if (override && *override) {
-        snprintf(lib->root, sizeof(lib->root), "%s", override);
-        LOG("skeniram %s (CR_ROOT)", lib->root);
-        scan_dir(lib, &cap, lib->root, 0);
-        if (lib->count > 1)
-            qsort(lib->items, (size_t)lib->count, sizeof(lib_item_t), item_sort_cb);
-        LOG("ukupno %d dokumenata", lib->count);
-        return lib->count;
+    char     cpath[LIB_PATH_MAX];
+    config_t cfg;
+    if (config_find(cpath, sizeof cpath) == 0 && config_load(&cfg, cpath) == 0) {
+        for (int i = 0; i < cfg.n_srcs; i++) {
+            source_t *s = source_http_new(cfg.srcs[i].name, cfg.srcs[i].url,
+                                          cfg.srcs[i].type, cfg.srcs[i].user,
+                                          cfg.srcs[i].pass, cfg.cache_mb);
+            if (s)
+                library_add_source(l, s);
+        }
     }
 
-    for (int i = 0; i < USB_SLOTS; i++) {
-        char        root[LIB_PATH_MAX];
-        struct stat st;
-
-        snprintf(root, sizeof(root), "/mnt/usb%d", i);
-        if (stat(root, &st) != 0 || !S_ISDIR(st.st_mode))
-            continue;
-
-        if (!lib->root[0])
-            snprintf(lib->root, sizeof(lib->root), "%s", root);
-
-        LOG("skeniram %s", root);
-        scan_dir(lib, &cap, root, 0);
-    }
-
-    if (lib->count > 1)
-        qsort(lib->items, (size_t)lib->count, sizeof(lib_item_t), item_sort_cb);
-
-    LOG("ukupno %d dokumenata", lib->count);
-    return lib->count;
+    LOG("izvora: %d", l->n_sources);
+    return l->n_sources;
 }
 
-void library_free(library_t *lib)
+void library_free(library_t *l)
 {
-    free(lib->items);
-    lib->items = NULL;
-    lib->count = 0;
+    for (int i = 0; i < LIB_DEPTH_MAX; i++)
+        level_clear(&l->stack[i]);
+
+    for (int i = 0; i < l->n_sources; i++)
+        source_free(l->sources[i]);
+    l->n_sources = 0;
+
+    free(l->state);
+    l->state   = NULL;
+    l->n_state = l->cap_state = 0;
 }
 
 /* ------------------------------------------------------------------ */
-/* Stanje citanja: obican tekst, "putanja<TAB>stranica" po liniji.     */
-/* Namerno primitivno - fajl je mali i mora prezivi nasilan prekid.    */
+/* Stanje citanja. Format nepromijenjen: "putanja<TAB>stranica".       */
+/* Kljuc je entry->path, dakle za mrezu puni URL.                      */
 
-static void state_path(library_t *lib, char *buf, size_t len)
+static void state_path(library_t *l, char *buf, size_t len)
 {
-    const char *root = lib->root[0] ? lib->root : "/mnt/usb0";
+    const char *root = l->root[0] ? l->root : "/mnt/usb0";
     int n = snprintf(buf, len, "%s/%s", root, STATE_FILE);
     if (n < 0 || (size_t)n >= len)
         snprintf(buf, len, "/mnt/usb0/%s", STATE_FILE);
 }
 
-void state_load(library_t *lib)
+static state_rec_t *state_find(library_t *l, const char *path)
+{
+    for (int i = 0; i < l->n_state; i++)
+        if (!strcmp(l->state[i].path, path))
+            return &l->state[i];
+    return NULL;
+}
+
+int state_page_for(const library_t *l, const char *path)
+{
+    for (int i = 0; i < l->n_state; i++)
+        if (!strcmp(l->state[i].path, path))
+            return l->state[i].page;
+    return -1;
+}
+
+static int state_grow(library_t *l)
+{
+    if (l->n_state < l->cap_state)
+        return 0;
+
+    int          ncap = l->cap_state ? l->cap_state * 2 : 64;
+    state_rec_t *ns   = realloc(l->state, (size_t)ncap * sizeof *ns);
+    if (!ns)
+        return -1;
+
+    l->state     = ns;
+    l->cap_state = ncap;
+    return 0;
+}
+
+void state_load(library_t *l)
 {
     char sp[LIB_PATH_MAX + 16];
-    state_path(lib, sp, sizeof(sp));
+    state_path(l, sp, sizeof sp);
 
     FILE *f = fopen(sp, "r");
     if (!f)
         return;
 
     char line[LIB_PATH_MAX + 32];
-    while (fgets(line, sizeof(line), f)) {
+    while (fgets(line, sizeof line, f)) {
         char *tab = strchr(line, '\t');
         if (!tab)
             continue;
         *tab = '\0';
 
-        int page = atoi(tab + 1);
-        for (int i = 0; i < lib->count; i++) {
-            if (!strcmp(lib->items[i].path, line)) {
-                lib->items[i].last_page = page;
-                break;
-            }
+        /* Odsjecena putanja bi postala pogresan kljuc i tiho izgubila
+         * zapamcenu stranicu, pa se predugacka linija radije preskace. */
+        if (strlen(line) >= LIB_PATH_MAX) {
+            LOG("stanje: preskacem predugacku putanju");
+            continue;
         }
+
+        if (state_grow(l) != 0)
+            break;
+
+        memcpy(l->state[l->n_state].path, line, strlen(line) + 1);
+        l->state[l->n_state].page = atoi(tab + 1);
+        l->n_state++;
     }
     fclose(f);
+    LOG("stanje: %d zapisa", l->n_state);
 }
 
-void state_save(library_t *lib, const char *path, int page)
+void state_save(library_t *l, const char *path, int page)
 {
-    for (int i = 0; i < lib->count; i++) {
-        if (!strcmp(lib->items[i].path, path)) {
-            lib->items[i].last_page = page;
-            break;
-        }
+    state_rec_t *r = state_find(l, path);
+
+    if (r) {
+        r->page = page;
+    } else {
+        if (state_grow(l) != 0)
+            return;
+        snprintf(l->state[l->n_state].path, LIB_PATH_MAX, "%s", path);
+        l->state[l->n_state].page = page;
+        l->n_state++;
     }
 
-    char sp[LIB_PATH_MAX], tmp[LIB_PATH_MAX + 16];
-    state_path(lib, sp, sizeof(sp));
-    snprintf(tmp, sizeof(tmp), "%s.tmp", sp);
+    /* Osvjezi i vidljivi red, da badge "nastavi" odmah bude tacan. */
+    lib_level_t *cur = library_cur(l);
+    for (int i = 0; i < cur->count; i++)
+        if (!strcmp(cur->entries[i].path, path))
+            cur->entries[i].last_page = page;
 
-    /* Upis u privremeni fajl pa rename - da gasenje konzole usred upisa
-     * ne ostavi polupraznu listu. */
+    char sp[LIB_PATH_MAX], tmp[LIB_PATH_MAX + 16];
+    state_path(l, sp, sizeof sp);
+    snprintf(tmp, sizeof tmp, "%s.tmp", sp);
+
+    /* Upis u privremeni fajl pa rename - gasenje konzole usred upisa
+     * ne smije ostaviti polupraznu listu. */
     FILE *f = fopen(tmp, "w");
     if (!f) {
         ERR("ne mogu da upisem stanje u %s", tmp);
         return;
     }
-    for (int i = 0; i < lib->count; i++) {
-        if (lib->items[i].last_page >= 0)
-            fprintf(f, "%s\t%d\n", lib->items[i].path, lib->items[i].last_page);
-    }
+    for (int i = 0; i < l->n_state; i++)
+        if (l->state[i].page >= 0)
+            fprintf(f, "%s\t%d\n", l->state[i].path, l->state[i].page);
     fclose(f);
     rename(tmp, sp);
 }
