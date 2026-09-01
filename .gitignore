@@ -1,0 +1,16 @@
+# Build artefakti
+build/
+*.o
+*.elf
+comicreader
+*.tar.gz
+
+# Header-only zavisnosti - dovlaci ih scripts/deps.sh, namjerno van repoa
+# (vidi komentar u scripts/deps.sh)
+src/stb_image.h
+src/font8x8_basic.h
+
+# Privremeno
+*.tmp
+*.log
+core
