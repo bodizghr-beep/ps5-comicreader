@@ -25,6 +25,10 @@ SRCS := \
 	$(SRCDIR)/common.c \
 	$(SRCDIR)/ui.c \
 	$(SRCDIR)/library.c \
+	$(SRCDIR)/config.c \
+	$(SRCDIR)/source.c \
+	$(SRCDIR)/source_usb.c \
+	$(SRCDIR)/source_http.c \
 	$(SRCDIR)/cache.c \
 	$(SRCDIR)/doc.c \
 	$(SRCDIR)/doc_archive.c \

@@ -33,8 +33,6 @@ typedef struct {
     screen_t  screen;
 
     /* browser */
-    int sel;
-    int scroll;
     int rows_visible;
 
     /* reader */
@@ -45,7 +43,8 @@ typedef struct {
     float     zoom;
     float     pan_x, pan_y;
     uint32_t  hud_until;
-    char      cur_path[LIB_PATH_MAX];
+    char      cur_path[LIB_PATH_MAX];    /* kljuc za state: putanja ili URL */
+    char      cur_local[LIB_PATH_MAX];   /* ono sto je dobio cache_open */
 
     int running;
 } app_t;
@@ -66,21 +65,31 @@ static void reader_close(app_t *a)
     }
 }
 
-static void reader_open(app_t *a, int item)
+static void reader_open(app_t *a, source_t *src, lib_entry_t *it, int want_page)
 {
-    lib_item_t *it = &a->lib.items[item];
+    char local[LIB_PATH_MAX];
 
     reader_close(a);
 
-    a->cache = cache_open(it->path, a->ui.r);
-    if (!a->cache) {
-        ERR("ne mogu da otvorim %s", it->path);
+    /* Za USB je ovo identitet; mrezni izvor ovdje vraca URL ili lokalnu kopiju. */
+    if (src->be->fetch(src, it->path, local, sizeof local, NULL, NULL) != 0) {
+        ERR("ne mogu da pripremim %s", it->path);
         return;
     }
 
-    snprintf(a->cur_path, sizeof(a->cur_path), "%s", it->path);
+    a->cache = cache_open(local, a->ui.r);
+    if (!a->cache) {
+        ERR("ne mogu da otvorim %s", local);
+        return;
+    }
+
+    snprintf(a->cur_path,  sizeof a->cur_path,  "%s", it->path);
+    snprintf(a->cur_local, sizeof a->cur_local, "%s", local);
+
     a->n_pages = cache_page_count(a->cache);
-    a->page    = (it->last_page > 0 && it->last_page < a->n_pages) ? it->last_page : 0;
+
+    int p = (want_page >= 0) ? want_page : it->last_page;
+    a->page    = (p > 0 && p < a->n_pages) ? p : 0;
     a->fit     = FIT_SCREEN;
     a->zoom    = 1.0f;
     a->pan_x   = a->pan_y = 0.0f;
@@ -146,53 +155,79 @@ static SDL_Rect page_rect(app_t *a, int tw, int th)
 
 static void draw_browser(app_t *a)
 {
-    ui_t *ui = &a->ui;
-    char  buf[256];
+    ui_t        *ui = &a->ui;
+    lib_level_t *lv = library_cur(&a->lib);
+    char         buf[256];
 
     ui_fill_rect(ui, 0, 0, ui->screen_w, ui->screen_h, COL_BG);
     ui_text(ui, PAD, 44, 4, COL_ACCENT, "%s", APP_NAME);
-    ui_text(ui, PAD, 88, 2, COL_DIM, "%d dokumenata na USB-u", a->lib.count);
 
-    if (a->lib.count == 0) {
+    /* Breadcrumb se skracuje s LIJEVA - rep putanje je informativniji. */
+    char bc[LIB_PATH_MAX];
+    library_breadcrumb(&a->lib, bc, sizeof bc);
+
+    int    max_bc = (ui->screen_w - 2 * PAD) / (8 * 2);
+    size_t bclen  = strlen(bc);
+    if (max_bc > 4 && bclen > (size_t)max_bc)
+        ui_text(ui, PAD, 88, 2, COL_DIM, "...%s", bc + bclen - (size_t)max_bc + 3);
+    else
+        ui_text(ui, PAD, 88, 2, COL_DIM, "%s", bc);
+
+    const char *footer = (a->lib.depth == 0)
+        ? "Krst: otvori   Krug: izlaz   D-pad: kretanje"
+        : "Krst: otvori   Krug: nazad   D-pad: kretanje";
+
+    if (lv->err[0]) {
+        ui_text(ui, PAD, LIST_TOP + 60, 3, COL_TEXT, "greska: %s", lv->err);
+        ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM, "%s", footer);
+        return;
+    }
+
+    if (lv->count == 0) {
         ui_text(ui, PAD, LIST_TOP + 60, 3, COL_TEXT,
-                "Nema fajlova. Ocekivano: /mnt/usb0/...");
+                a->lib.depth == 0 ? "Nema izvora. Ocekivano: /mnt/usb0/..." : "Prazno");
         ui_text(ui, PAD, LIST_TOP + 110, 2, COL_DIM,
                 "Podrzano: cbz cbr cb7 cbt zip rar 7z pdf");
+        ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM, "%s", footer);
         return;
     }
 
     /* Skrol drzi selekciju unutar vidljivog opsega. */
-    if (a->sel < a->scroll)
-        a->scroll = a->sel;
-    if (a->sel >= a->scroll + a->rows_visible)
-        a->scroll = a->sel - a->rows_visible + 1;
+    if (lv->sel < lv->scroll)
+        lv->scroll = lv->sel;
+    if (lv->sel >= lv->scroll + a->rows_visible)
+        lv->scroll = lv->sel - a->rows_visible + 1;
 
     int max_chars = (ui->screen_w - 2 * PAD - 200) / (8 * 2);
 
     for (int i = 0; i < a->rows_visible; i++) {
-        int idx = a->scroll + i;
-        if (idx >= a->lib.count)
+        int idx = lv->scroll + i;
+        if (idx >= lv->count)
             break;
 
-        int         y  = LIST_TOP + i * ROW_H;
-        lib_item_t *it = &a->lib.items[idx];
-        int         on = (idx == a->sel);
+        int          y  = LIST_TOP + i * ROW_H;
+        lib_entry_t *it = &lv->entries[idx];
+        int          on = (idx == lv->sel);
 
         ui_fill_rect(ui, PAD - 16, y - 6, ui->screen_w - 2 * PAD + 32, ROW_H - 4,
                      on ? COL_SEL : COL_PANEL);
 
-        ui_ellipsize(buf, sizeof(buf), it->title, max_chars);
-        ui_text(ui, PAD, y, 2, on ? COL_TEXT : COL_DIM, "%s", buf);
+        /* Folder se raspoznaje po kosoj crti i boji - font je ASCII, ikone otpadaju. */
+        char label[LIB_TITLE_MAX + 2];
+        snprintf(label, sizeof label, "%s%s", it->name, it->is_dir ? "/" : "");
+        ui_ellipsize(buf, sizeof buf, label, max_chars);
 
-        if (it->last_page > 0) {
+        SDL_Color col = on ? COL_TEXT : (it->is_dir ? COL_ACCENT : COL_DIM);
+        ui_text(ui, PAD, y, 2, col, "%s", buf);
+
+        if (!it->is_dir && it->last_page > 0) {
             const char *badge = "nastavi";
             ui_text(ui, ui->screen_w - PAD - ui_text_width(2, badge), y, 2,
                     COL_ACCENT, "%s", badge);
         }
     }
 
-    ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM,
-            "Krst: otvori   Krug: izlaz   D-pad: kretanje");
+    ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM, "%s", footer);
 }
 
 static void draw_reader(app_t *a)
@@ -236,24 +271,33 @@ static void draw_reader(app_t *a)
 static void on_button(app_t *a, SDL_GameControllerButton b)
 {
     if (a->screen == SCREEN_BROWSER) {
+        lib_level_t *lv = library_cur(&a->lib);
+
         switch (b) {
         case SDL_CONTROLLER_BUTTON_DPAD_UP:
-            if (a->sel > 0) a->sel--;
+            if (lv->sel > 0) lv->sel--;
             break;
         case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-            if (a->sel < a->lib.count - 1) a->sel++;
+            if (lv->sel < lv->count - 1) lv->sel++;
             break;
         case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
-            a->sel = MAX(0, a->sel - a->rows_visible);
+            lv->sel = MAX(0, lv->sel - a->rows_visible);
             break;
         case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
-            a->sel = MIN(a->lib.count - 1, a->sel + a->rows_visible);
+            lv->sel = MIN(lv->count - 1, lv->sel + a->rows_visible);
             break;
         case SDL_CONTROLLER_BUTTON_A:
-            if (a->lib.count > 0) reader_open(a, a->sel);
+            if (lv->count == 0)
+                break;
+            if (lv->entries[lv->sel].is_dir)
+                library_enter(&a->lib, lv->sel);
+            else
+                reader_open(a, lv->src, &lv->entries[lv->sel], -1);
             break;
         case SDL_CONTROLLER_BUTTON_B:
-            a->running = 0;
+            /* Krug izlazi iz nivoa; u korijenu gasi aplikaciju. */
+            if (!library_back(&a->lib))
+                a->running = 0;
             break;
         default:
             break;
@@ -394,7 +438,7 @@ int main(int argc, char **argv)
     }
     a.rows_visible = (sh - LIST_TOP - 100) / ROW_H;
 
-    library_scan(&a.lib);
+    library_init(&a.lib);
     state_load(&a.lib);
 
     SDL_GameController *gc = NULL;
