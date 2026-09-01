@@ -52,3 +52,28 @@ const char *path_base(const char *path)
     const char *slash = strrchr(path, '/');
     return slash ? slash + 1 : path;
 }
+
+int is_url(const char *path)
+{
+    return path && !strncasecmp(path, "http://", 7);
+}
+
+void url_decode(char *dst, size_t dstlen, const char *src)
+{
+    size_t o = 0;
+
+    if (!dstlen)
+        return;
+
+    for (const char *p = src; *p && o + 1 < dstlen; p++) {
+        if (*p == '%' && isxdigit((unsigned char)p[1]) &&
+                         isxdigit((unsigned char)p[2])) {
+            char hex[3] = { p[1], p[2], '\0' };
+            dst[o++] = (char)strtol(hex, NULL, 16);
+            p += 2;
+        } else {
+            dst[o++] = *p;
+        }
+    }
+    dst[o] = '\0';
+}

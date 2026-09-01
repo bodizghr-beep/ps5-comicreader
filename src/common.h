@@ -33,4 +33,10 @@ const char *path_ext(const char *path);
 /* Vraca pokazivac na ime fajla unutar putanje. */
 const char *path_base(const char *path);
 
+/* Vraca 1 ako putanja pocinje sa http:// (bez obzira na velicinu slova). */
+int  is_url(const char *path);
+
+/* Dekodira %XX sekvence. Nepotpun escape se prepisuje doslovno. */
+void url_decode(char *dst, size_t dstlen, const char *src);
+
 #endif /* COMMON_H */
