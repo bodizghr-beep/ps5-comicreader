@@ -29,6 +29,8 @@ SRCS := \
 	$(SRCDIR)/source.c \
 	$(SRCDIR)/source_usb.c \
 	$(SRCDIR)/source_http.c \
+	$(SRCDIR)/dav_parse.c \
+	$(SRCDIR)/html_parse.c \
 	$(SRCDIR)/cache.c \
 	$(SRCDIR)/doc.c \
 	$(SRCDIR)/doc_archive.c \
@@ -99,8 +101,10 @@ include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
 # Sce biblioteke koje SDL2 vuce za video, kontroler i zvuk.
 # libwebp postoji u pacbrew paketima, pa se webp stranice podrzavaju na PS5.
 # Host build ga ukljucuje samo ako je biblioteka prisutna (vidi nize).
-PS5_PKGS   := sdl2 libarchive libwebp
-BASE_CFLAGS += -DHAVE_WEBP
+PS5_PKGS   := sdl2 libarchive libwebp libcurl libxml-2.0
+# -DCURL_STATICLIB je obavezan: libcurl.pc iz pacbrew paketa ga nosi u Cflags,
+# a bez njega se simboli traze kao uvezeni iz DLL-a.
+BASE_CFLAGS += -DHAVE_WEBP -DCURL_STATICLIB
 PS5_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PS5_PKGS))
 PS5_LIBS   := $(shell $(PKG_CONFIG) --libs $(PS5_PKGS))
 

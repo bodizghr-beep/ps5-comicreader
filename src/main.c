@@ -3,6 +3,7 @@
  * Payload ulazna tacka. Redosled: SDL -> prozor -> skener USB-a -> petlja.
  */
 #include <SDL2/SDL.h>
+#include <curl/curl.h>
 
 #include "common.h"
 #include "ui.h"
@@ -391,6 +392,9 @@ int main(int argc, char **argv)
     }
     LOG("SDL_Init VIDEO ok");
 
+    /* Prije bilo koje niti - curl_global_init nije thread-safe. */
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
     /* Gamepad inicijalizuj odvojeno - pad se i dalje cita ako ovo propadne. */
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
         ERR("SDL_Init GAMECONTROLLER: %s (nastavlja bez kontrolera)", SDL_GetError());
@@ -507,6 +511,7 @@ int main(int argc, char **argv)
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
+    curl_global_cleanup();
 
     LOG("kraj");
     return 0;
