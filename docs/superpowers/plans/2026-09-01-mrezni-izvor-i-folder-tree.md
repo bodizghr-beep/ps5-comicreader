@@ -5153,3 +5153,14 @@ Provjereno svih 18 sekcija naspram 17 zadataka:
 
 Jedina stavka iz specifikacije koja **namjerno** nije u planu je sidecar indeks unosa iz
 §18 — tamo je i opisana kao zaseban zadatak, ne dio ovog plana.
+
+---
+
+## Poslije Faze 3 — otvorene stavke
+
+- **Akcelerisani SDL renderer.** `SDL_CreateRenderer` sa `SDL_RENDERER_ACCELERATED`
+  javlja `Couldn't find matching render driver` i pada na software. Na host build-u
+  pod `SDL_VIDEODRIVER=dummy` to je očekivano i bezopasno. **Prvo utvrditi da li se
+  dešava i na konzoli** (klogsrv, port 3232) — ako da, zum velikih stranica će biti
+  spor i vrijedi provjeriti da li pacbrew SDL2 uopšte ima GL/GNM renderer i traži li
+  `SDL_HINT_RENDER_DRIVER`. Ako se dešava samo na hostu, nema šta da se popravlja.
