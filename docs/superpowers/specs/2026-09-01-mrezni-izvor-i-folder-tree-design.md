@@ -42,6 +42,8 @@ inače pisalo dvaput:
 | Preuzeti fajl | LRU keš u `/data/tmp/ps5cr/` | Ponovno otvaranje bez mreže; budžet ograničen slobodnim prostorom |
 | Config | Ponovljeni `[source]` blokovi | Lista izvora ionako postoji (do 8 USB slotova) |
 | Veliki CBR | Range streaming kroz libarchive | Mjereno: <1% prometa umjesto punog fajla (§5) |
+| Skok unazad | Keš malih čitanja u `vfs_http.c` | Mjereno: 1.93 MB pokriva cijelu šetnju, ponovno otvaranje postaje besplatno (§7.4) |
+| Prekid mreže | Ponavljanje + ručni oporavak na tekućoj stranici | Pad WiFi-ja ne smije vratiti korisnika na početak (§7.5) |
 
 ## 5. Mjerenja koja opravdavaju §7
 
@@ -107,8 +109,19 @@ Tri posljedice:
 
 ### 5.2 Propusnost PS5 i odluka o §7
 
-Izmjereno FTP transferom na konzolu: **5.69 MB/s** preko PS5 WiFi-ja. Prelomna tačka je
-13 MB/s, pa **streaming pobjeđuje**:
+Izmjereno FTP uploadom s ovog PC-a (<ip-pc>, žičano) na **konzolu** (<ip-konzole>, etaHEN
+FTP na portu 1337): **5.69 MB/s**. Smjer je PC → PS5, dakle PS5 *prima* — isti smjer koji
+je bitan pri čitanju sa NAS-a.
+
+Šta ta brojka jeste i šta nije:
+
+- **Jeste** propusnost PS5-ovog WiFi linka u prijemnom smjeru.
+- **Nije** mjerenje puta PS5 → NAS; NAS u tom transferu nije učestvovao. Njegova strana je
+  mjerena zasebno (81 MB/s žičano, §5.1), pa nije usko grlo — ostaje PS5 WiFi.
+- Uzorak je mali (5.59 MB, ~1 s), pa TCP slow start vjerovatno **podcjenjuje** stvarnu
+  ustaljenu brzinu.
+
+Prelomna tačka je 13 MB/s, pa **streaming pobjeđuje**:
 
 | | streaming | pun download |
 |---|---|---|
@@ -145,10 +158,25 @@ jeftinu šetnju po zaglavljima, ali skupo izvlačenje pojedinačne stranice.
   uključujući `Public/` i `Multimedia/`, a PROPFIND korijena vraća `207` s praznim
   spiskom. Taj obrazac je dijagnostika, ne kvar.
 - **KeepAlive je isključen na cijelom `:5000` vhostu**, uključujući GET na fajlu:
-  20 uzastopnih Range GET-ova otvorilo je 20 TCP konekcija. Na portu 80 istog uređaja
-  keep-alive radi (5 zahtjeva, 1 konekcija), pa je to konfiguracija DAV vhosta, ne
-  ograničenje uređaja. Mijenjanje te konfiguracije traži admin pristup i po pravilu
-  ne preživi firmware update, pa se dizajn na to ne oslanja.
+  20 uzastopnih Range GET-ova otvorilo je 20 TCP konekcija, a `206` odgovor nosi
+  `Connection: close`. Na portu 80 istog uređaja keep-alive radi (5 zahtjeva, 1
+  konekcija), pa je to konfiguracija DAV vhosta, ne ograničenje uređaja.
+- **Ali keep-alive nije uzrok cijene zahtjeva.** Dekompozicija 20 zahtjeva:
+
+  | faza | vrijeme |
+  |---|---|
+  | `time_namelookup` | 0.0 ms |
+  | `time_connect` (TCP handshake) | **0.3 ms** |
+  | `time_starttransfer` (server do prvog bajta) | **40-160 ms**, medijana ~42 ms |
+
+  Handshake je 0.2% troška. Uključivanje keep-alive-a uštedjelo bi ~0.15 s na 496
+  zahtjeva, dakle ništa naspram ~57 s. Skokovi do 500-800 ms su disk seek na NAS-u.
+- **Nema 401-probe.** Provjereno poređenjem `curl -u` i ručnog `Authorization` headera nad
+  zagrijanim page kešom: medijane 38.6 naspram 37.5 ms. curl šalje Basic preemptivno, pa
+  se broj zahtjeva ne udvostručuje i tu nema šta da se uštedi.
+
+  Zaključak: adaptivni chunk (§7.2) ostaje nužan bez obzira na keep-alive, jer cijena je
+  po *zahtjevu* i servrska, a ne po konekciji.
 - Admin UI je na 8080 (`Server: http server 1.0`), nema veze s ovim.
 - `libcurl.a` 8.18.0 i `libxml2` postoje u pacbrew paketima.
 - `libcurl.pc` ima u `Libs.private` ukucane `/opt/ps5-payload-sdk` putanje, a SDK je
@@ -230,6 +258,69 @@ pokretanja ijedne niti (nije thread-safe).
 
 Neuspjeh Range zahtjeva vraća `ARCHIVE_FATAL`; posljedica je postojeći
 `cache_failed()` put, koji već crta „Stranica N se ne može prikazati".
+
+### 7.4 Keš malih čitanja — bez njega je skok unazad neupotrebljiv
+
+Ovo je najskuplji propust zatečenog dizajna i otkriven je tek pri pisanju §7.5.
+
+`ar_seek_to()` (`src/doc_archive.c:134`) pri `d->pos > ord` radi `ar_reset()` pa
+`ar_open()` i šeta zaglavlja **od nule**. Nad lokalnim fajlom to je nekoliko `lseek`-ova;
+preko HTTP-a je to `ord` zahtjeva.
+
+A `cache.c` prefetch redoslijed je `focus`, `focus+1`, `focus+2`, **`focus-1`**
+(`PREFETCH_FWD 2`, `PREFETCH_BWD 1`, `src/cache.c:7-8,64-71`). Dakle **svaki okret
+stranice** pokreće jedan skok unazad:
+
+| stranica | zahtjeva za skok unazad | vrijeme |
+|---|---|---|
+| 100 | ~100 | 4-16 s |
+| 400 | ~400 | 16-64 s |
+
+Trošak raste što se dublje čita. Uz to su unosi sortirani po imenu
+(`qsort(entry_sort_cb)`, `src/doc_archive.c:265`), a `ord` je pozicija u arhivi — kad se
+ta dva poretka razilaze, i kretanje unaprijed može tražiti skok unazad.
+
+**Rješenje ostaje unutar `vfs_http.c`:** keš pročitanih chunkova, ključ je offset.
+
+- kešira se samo `chunk <= 64 KB` — to su čitanja zaglavlja
+- gornja granica 8 MB, izbacivanje FIFO
+- podaci stranice (veliki chunkovi) se **ne** keširaju: pojeli bi budžet, a pri ponovnom
+  otvaranju se ionako ne čitaju ponovo — ponavlja se samo šetnja po zaglavljima
+
+Mjereno na `Stripoteka 41-50.cbr`: dva nezavisna prolaza daju **bajt-identičan** trag
+offseta, dakle šetnja je deterministična. Ima **495 različitih offseta, ukupno 1.93 MB**.
+Ponovna šetnja nakon `ar_reset()` zato pogađa keš 100% i košta **nula** mrežnih zahtjeva.
+
+Skok unazad time postaje CPU operacija. `cache.c` se ne dira, `PREFETCH_BWD` ostaje 1.
+Prvo otvaranje i dalje košta ~57 s (§5.2) — keš ubrzava sve poslije njega.
+
+### 7.5 Prekid mreže usred čitanja
+
+Zatečeno ponašanje bi bilo loše: neuspio Range GET vraća `ARCHIVE_FATAL`, `doc_t` ostaje
+neupotrebljiv i cijela sesija čitanja umire uz „Stranica N se ne može prikazati".
+
+Zahtjev: kratak pad WiFi-ja ne smije izbaciti korisnika, a pogotovo ne na početak stripa.
+Dva sloja:
+
+**1. Ponavljanje u `vfs_http.c`, providno za libarchive.** Svaki Range GET se pokušava
+tri puta, s pauzama 0.5 s / 2 s / 5 s, i tek onda vraća `ARCHIVE_FATAL`.
+
+- ponavlja se na: `CURLE_COULDNT_CONNECT`, `CURLE_OPERATION_TIMEDOUT`,
+  `CURLE_RECV_ERROR`, `CURLE_SEND_ERROR`, `CURLE_PARTIAL_FILE`, `CURLE_GOT_NOTHING`,
+  te HTTP `5xx`
+- **ne** ponavlja se na `401`, `403`, `404` — to su trajne greške i ponavljanje ih samo
+  odlaže
+
+Ovo pokriva prekide kraće od ~8 s, što je većina WiFi smetnji.
+
+**2. Oporavak u `main.c`, kad ponavljanje ne uspije.** `SCREEN_READER` prikazuje
+`Veza prekinuta - Krst: pokusaj ponovo   Krug: nazad na listu`. Krst ponovo poziva
+`reader_open()` **na tekućoj stranici**, ne na zapamćenoj — zato `reader_open()` dobija
+eksplicitan argument stranice umjesto da je uvijek čita iz `it->last_page`.
+
+Zahvaljujući §7.4, to ponovno otvaranje ne plaća šetnju po zaglavljima ako proces još
+živi. Ako je proces ugašen, `.ps5cr_state` ionako čuva stranicu (§14), pa se čitanje
+nastavlja gdje je stalo.
 
 ## 8. `source.h` — apstrakcija izvora
 
@@ -416,6 +507,10 @@ Svi bez mreže, uz postojeća dva pod ASan/UBSan:
   `python3 -m http.server` je nema). Provjerava i da adaptivni chunk daje očekivan broj
   zahtjeva iz §5.
 - `tests/test_nav.c` — ulazak/izlazak, `sel`/`scroll` pamćenje, granice steka, breadcrumb
+- `tests/test_vfs_cache.c` — druga šetnja po istoj arhivi ne smije poslati nijedan novi
+  HTTP zahtjev (§7.4); mali chunkovi se keširaju, veliki ne
+- ponavljanje iz §7.5 — `tests/range_server.py` dobija režim ubacivanja greške (prekid
+  veze usred odgovora, `503`, `401`), test provjerava da se prva tri ponavljaju a `401` ne
 
 ## 17. Build
 
@@ -436,5 +531,6 @@ Moguć dodatan link zahtjev: OpenSSL koji curl vuče može tražiti `-lSceSsl` /
 | Otvaranje traje ~57 s | Korisnik čeka pri prvom otvaranju stripa | Prihvaćeno: mjereno je 2.4× brže od downloada na ovoj mreži. Ako zasmeta, sidecar indeks unosa u `/data/tmp` čini svako sljedeće otvaranje trenutnim — zaseban zadatak, ne dio ovog plana |
 | PS5 WiFi brži nego izmjereno | Streaming gubi prednost | Prag je 13 MB/s naspram izmjerenih 5.69; download režim ionako ostaje u kodu (§10) i prebacivanje je promjena jednog uslova |
 | Solidan komprimovan RAR | Skupo izvlačenje stranice | Detektovati i pasti na download režim |
+| Keš zaglavlja premaši 8 MB | Skok unazad ponovo ide na mrežu | Mjereno 1.93 MB na 504 stranice; granica je 4× rezerve. Preko toga FIFO izbacuje i degradacija je postupna, ne pad |
 | `libcurl.pc` relokacija | Ne linkuje se | §17, prvo linkovanje |
 | QNAP šalje netipičan PROPFIND XML | Prazan listing | Fixture iz stvarnog odgovora, ne izmišljen |
