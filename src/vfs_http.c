@@ -14,6 +14,13 @@
 #define VH_CHUNK_MAX (1024 * 1024)
 #define VH_URL_MAX   1024
 
+/* Kesiraju se samo mala citanja - to su zaglavlja. Podaci stranice su
+ * veliki i pri ponovnom otvaranju se ionako ne citaju ponovo.
+ * Mjereno: 495 offseta i 1.93 MB pokriva arhivu od 504 stranice, pa je
+ * 8 MB cetvorostruka rezerva. */
+#define VH_CACHE_MAX_CHUNK (64 * 1024)
+#define VH_CACHE_BUDGET    (8 * 1024 * 1024)
+
 struct vfs_http {
     char     url[VH_URL_MAX];
     CURL    *curl;
@@ -27,6 +34,18 @@ struct vfs_http {
 
     size_t   chunk;      /* trenutna velicina zahtjeva */
     long     requests;
+
+    /* Kes zaglavlja: bez njega svaki skok unazad ponovo seta kroz arhivu,
+     * jer ar_seek_to() radi reopen a cache.c trazi focus-1 pri svakom
+     * okretu stranice (spec 7.4). */
+    struct vh_ent {
+        int64_t  off;
+        size_t   len;
+        uint8_t *data;
+    }       *cache;
+    int      n_cache, cap_cache;
+    size_t   cache_bytes;
+    long     hits, misses;
 };
 
 typedef struct {
@@ -50,6 +69,71 @@ static size_t sink_write(void *data, size_t sz, size_t nm, void *ud)
     memcpy(s->v->buf + s->len, data, n);
     s->len += n;
     return n;
+}
+
+static struct vh_ent *cache_find(vfs_http_t *v, int64_t off, size_t len)
+{
+    for (int i = 0; i < v->n_cache; i++)
+        if (v->cache[i].off == off && v->cache[i].len >= len)
+            return &v->cache[i];
+    return NULL;
+}
+
+static void cache_put(vfs_http_t *v, int64_t off, const uint8_t *data, size_t len)
+{
+    if (len > VH_CACHE_MAX_CHUNK)
+        return;
+    if (cache_find(v, off, len))
+        return;
+
+    /* FIFO: izbacuju se najstariji upisi, s pocetka niza. */
+    int drop = 0;
+    while (v->cache_bytes + len > VH_CACHE_BUDGET && drop < v->n_cache) {
+        v->cache_bytes -= v->cache[drop].len;
+        free(v->cache[drop].data);
+        drop++;
+    }
+    if (drop > 0) {
+        memmove(v->cache, v->cache + drop,
+                (size_t)(v->n_cache - drop) * sizeof *v->cache);
+        v->n_cache -= drop;
+    }
+
+    if (v->n_cache == v->cap_cache) {
+        int            ncap = v->cap_cache ? v->cap_cache * 2 : 128;
+        struct vh_ent *nc   = realloc(v->cache, (size_t)ncap * sizeof *nc);
+        if (!nc)
+            return;
+        v->cache     = nc;
+        v->cap_cache = ncap;
+    }
+
+    uint8_t *copy = malloc(len);
+    if (!copy)
+        return;
+    memcpy(copy, data, len);
+
+    v->cache[v->n_cache].off  = off;
+    v->cache[v->n_cache].len  = len;
+    v->cache[v->n_cache].data = copy;
+    v->n_cache++;
+    v->cache_bytes += len;
+}
+
+static void cache_free(vfs_http_t *v)
+{
+    for (int i = 0; i < v->n_cache; i++)
+        free(v->cache[i].data);
+    free(v->cache);
+    v->cache       = NULL;
+    v->n_cache     = v->cap_cache = 0;
+    v->cache_bytes = 0;
+}
+
+void vfs_http_cache_stats(const vfs_http_t *v, long *hits, long *misses)
+{
+    if (hits)   *hits   = v ? v->hits : 0;
+    if (misses) *misses = v ? v->misses : 0;
 }
 
 /* Jedan Range GET. 0 = uspjeh, -1 = greska. */
@@ -144,6 +228,7 @@ void vfs_http_free(vfs_http_t *v)
         return;
     if (v->curl)
         curl_easy_cleanup(v->curl);
+    cache_free(v);
     free(v->buf);
     free(v);
 }
@@ -173,6 +258,17 @@ la_ssize_t vh_read(struct archive *a, void *cd, const void **buf)
     if (v->size >= 0 && v->off + (int64_t)want > v->size)
         want = (size_t)(v->size - v->off);
 
+    struct vh_ent *ce = cache_find(v, v->off, want);
+    if (ce) {
+        v->hits++;
+        *buf = ce->data;
+        la_ssize_t n = (la_ssize_t)ce->len;
+        v->off  += n;
+        v->chunk = (v->chunk * 4 > VH_CHUNK_MAX) ? VH_CHUNK_MAX : v->chunk * 4;
+        return n;
+    }
+    v->misses++;
+
     if (fetch_range(v, v->off, want) != 0) {
         if (a)
             archive_set_error(a, -1, "vfs_http: Range zahtjev nije uspio");
@@ -181,6 +277,8 @@ la_ssize_t vh_read(struct archive *a, void *cd, const void **buf)
 
     if (v->buf_len == 0)
         return 0;
+
+    cache_put(v, v->off, v->buf, v->buf_len);
 
     *buf = v->buf;
     v->off += (int64_t)v->buf_len;

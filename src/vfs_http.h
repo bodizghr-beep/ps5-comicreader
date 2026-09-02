@@ -28,4 +28,7 @@ int64_t vfs_http_size(const vfs_http_t *v);
  * ne salju nista i da kes zaglavlja radi. */
 long vfs_http_requests(const vfs_http_t *v);
 
+/* Statistika kesa malih citanja (spec 7.4). */
+void vfs_http_cache_stats(const vfs_http_t *v, long *hits, long *misses);
+
 #endif /* VFS_HTTP_H */
