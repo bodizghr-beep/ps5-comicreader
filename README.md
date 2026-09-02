@@ -7,11 +7,16 @@ Formati: **CBZ, CBR, CB7, CBT, ZIP, RAR, 7Z, TAR** odmah, **PDF** uz `WITH_PDF=1
 
 ---
 
-## Zašto payload, a ne PKG
+## Zašto homebrew, a ne PKG
 
-Fake-signing PKG-a na PS5 nije zrelo. Payload se šalje na `elfldr` preko mreže i
-izvrši odmah — nema potpisivanja, instalacije ni tragova u sistemskoj bazi.
-Pošto exploit ionako nije trajan, ikona u meniju ne bi ništa donela.
+Fake-signing PKG-a na PS5 nije zrelo, pa se čitač pakuje kao **websrv homebrew**:
+`eboot.elf` plus ikona u `/data/homebrew/ComicReader/`, a pokreće se iz Homebrew
+Loader-a. Nema potpisivanja, instalacije ni tragova u sistemskoj bazi.
+
+**Slanje na `elfldr` (port 9021) ovdje ne radi.** Payload poslan tamo izvršava se u
+sistemskom procesu koji ne posjeduje video izlaz, pa `SDL_Init` padne sa
+`sceVideoOutOpen: Device busy`. Grafička aplikacija mora ići kroz websrv — detalji i
+tačna struktura direktorija su u `SETUP.md`.
 
 ## Arhitektura
 
@@ -52,8 +57,19 @@ arhivu. Prefetch je usmeren unapred pa se drugi slučaj retko dešava.
 scripts/deps.sh                     # dovlači stb_image.h i font8x8_basic.h
 export PS5_PAYLOAD_SDK=/opt/ps5-sdk
 make                                # -> comicreader.elf
-make send PS5_HOST=192.168.1.50     # šalje na elfldr (port 9021)
+readelf -d comicreader.elf | grep kernel    # mora dati SAMO libkernel_sys.sprx
 ```
+
+Slanje ide preko FTP-a na konzolu, u strukturu koju websrv očekuje:
+
+```sh
+curl -T comicreader.elf ftp://<ip>:1337/data/homebrew/ComicReader/eboot.elf
+```
+
+Pa Home ekran → Homebrew Loader → ComicReader.
+
+> `make send` (elfldr, port 9021) ostaje u Makefile-u za negrafičke test payload-e.
+> Za čitač ne radi — vidi gore.
 
 ### Zavisnosti koje moraš sam cross-kompajlirati
 
