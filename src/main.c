@@ -237,6 +237,45 @@ static SDL_Rect page_rect(app_t *a, int tw, int th)
     return rc;
 }
 
+/* Softverski renderer skalira svaki piksel koji mu se preda, pa se pri zumu
+ * isplati predati mu samo vidljivi dio stranice. Rezultat je identican -
+ * ovo je izbjegavanje posla, ne aproksimacija. Pri "uklopi u ekran" je
+ * cijela stranica vidljiva pa se nista ne mijenja.
+ *
+ * Akcelerisani renderer bi ovo radio na GPU besplatno, ali ga na PS5 nema:
+ * SDL2 iz pacbrew paketa sadrzi samo SW_RenderDriver, PS5 video draiver je
+ * framebuffer bez GL konteksta, a libGL.so je simlink na OSMesu - dakle opet
+ * CPU. Vidi docs/superpowers/plans/ za mjerenja.
+ */
+static int clip_to_screen(const ui_t *ui, SDL_Rect full, int tw, int th,
+                          SDL_Rect *src, SDL_Rect *dst)
+{
+    SDL_Rect screen = { 0, 0, ui->screen_w, ui->screen_h };
+    SDL_Rect vis;
+
+    if (!SDL_IntersectRect(&full, &screen, &vis))
+        return 0;                       /* nista nije vidljivo */
+
+    /* Nazad iz ekranskih u teksturne koordinate. */
+    double sx = (double)tw / (double)full.w;
+    double sy = (double)th / (double)full.h;
+
+    src->x = (int)((vis.x - full.x) * sx);
+    src->y = (int)((vis.y - full.y) * sy);
+    src->w = (int)(vis.w * sx + 0.5);
+    src->h = (int)(vis.h * sy + 0.5);
+
+    if (src->x < 0) src->x = 0;
+    if (src->y < 0) src->y = 0;
+    if (src->x + src->w > tw) src->w = tw - src->x;
+    if (src->y + src->h > th) src->h = th - src->y;
+    if (src->w <= 0 || src->h <= 0)
+        return 0;
+
+    *dst = vis;
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 
 static void draw_browser(app_t *a)
@@ -359,8 +398,11 @@ static void draw_reader(app_t *a)
     SDL_Texture *t = cache_texture(a->cache, a->page, &tw, &th);
 
     if (t) {
-        SDL_Rect dst = page_rect(a, tw, th);
-        SDL_RenderCopy(ui->r, t, NULL, &dst);
+        SDL_Rect full = page_rect(a, tw, th);
+        SDL_Rect src, dst;
+
+        if (clip_to_screen(ui, full, tw, th, &src, &dst))
+            SDL_RenderCopy(ui->r, t, &src, &dst);
     } else if (cache_failed(a->cache, a->page)) {
         /* Kod mreznog izvora je pala veza daleko vjerovatnija od ostecene
          * slike, a za razliku od nje je i rjesiva. */
@@ -559,9 +601,12 @@ int main(int argc, char **argv)
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
                                            SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren) {
-        ERR("SDL_CreateRenderer accelerated: %s", SDL_GetError());
-        /* Pokusaj software renderer kao fallback */
-        LOG("pokusavam software renderer...");
+        /* Ocekivano na PS5, nije greska: SDL2 iz pacbrew paketa sadrzi samo
+         * SW_RenderDriver, PS5 video draiver je framebuffer bez GL konteksta,
+         * a libGL.so je simlink na OSMesu - dakle i "GL" bi bio CPU.
+         * Zato se zum oslanja na src pravougaonik u draw_reader. */
+        LOG("nema akcelerisanog renderera (%s), koristim software",
+            SDL_GetError());
         ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
     }
     if (!ren) {
