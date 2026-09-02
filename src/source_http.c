@@ -6,9 +6,16 @@
 #include "source.h"
 #include "dav_parse.h"
 #include "html_parse.h"
+#include "doc.h"
 #include "common.h"
 
 #include <curl/curl.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <dirent.h>
+#include <unistd.h>
+
+#define CACHE_DIR_DEFAULT "/data/tmp/ps5cr"
 
 typedef struct {
     char url[LIB_PATH_MAX];      /* korijen izvora, uvijek sa zavrsnom / */
@@ -194,13 +201,305 @@ static int http_list(source_t *s, const char *path, lib_entry_t **out, int *n)
     return 0;
 }
 
-/* Pravi fetch dolazi u Fazi 3 (Task 13). */
+/* ------------------------------------------------------------------ */
+/* Priprema fajla za citanje: stream ili pun download.                  */
+
+/* Streaming postoji samo kroz libarchive callback-ove, koje ima jedino
+ * doc_archive.c. Sve ostalo (PDF) mora biti pravi fajl na disku. */
+static int is_archive_path(const char *path)
+{
+    return doc_backend_for(path) == &doc_backend_archive;
+}
+
+static void cache_dir(char *out, size_t len)
+{
+    const char *base = getenv("CR_TMP");
+    if (!base || !*base)
+        base = CACHE_DIR_DEFAULT;
+
+    snprintf(out, len, "%s", base);
+
+    /* mkdir -p, po komponentama. */
+    for (char *p = out + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        mkdir(out, 0755);
+        *p = '/';
+    }
+    mkdir(out, 0755);
+}
+
+/* Ime u kesu: hash URL-a + citljivo ime, da se dva istoimena stripa iz
+ * razlicitih foldera ne pobrkaju. */
+static void cache_name(const char *url, char *out, size_t len)
+{
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)url; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+
+    char dec[LIB_PATH_MAX];
+    url_decode(dec, sizeof dec, url);
+
+    char safe[96];
+    snprintf(safe, sizeof safe, "%s", path_base(dec));
+    for (char *p = safe; *p; p++)
+        if (*p == '/' || *p == ' ' || *p == '\'' || *p == '"')
+            *p = '_';
+
+    char dir[LIB_PATH_MAX];
+    cache_dir(dir, sizeof dir);
+    snprintf(out, len, "%s/%08x_%s", dir, h, safe);
+}
+
+/* Budzet: manje od cache_mb iz configa i cetvrtine slobodnog prostora.
+ * cache_mb je gornja granica, ne obecanje. */
+static int64_t cache_budget(const char *dir, int cache_mb)
+{
+    struct statvfs vfs;
+    int64_t        cfg = (int64_t)cache_mb * 1024 * 1024;
+
+    if (statvfs(dir, &vfs) != 0)
+        return cfg;
+
+    int64_t freeb   = (int64_t)vfs.f_bavail * (int64_t)vfs.f_frsize;
+    int64_t quarter = freeb / 4;
+    return (cfg < quarter) ? cfg : quarter;
+}
+
+/* Izbacuje najstarije po mtime dok se ne oslobodi mjesto za `need`. */
+static void cache_evict(const char *dir, int64_t budget, int64_t need)
+{
+    for (;;) {
+        DIR *dp = opendir(dir);
+        if (!dp)
+            return;
+
+        int64_t total    = 0;
+        time_t  oldest_t = 0;
+        char    oldest[LIB_PATH_MAX] = { 0 };
+
+        struct dirent *de;
+        while ((de = readdir(dp)) != NULL) {
+            if (de->d_name[0] == '.')
+                continue;
+
+            char        p[LIB_PATH_MAX];
+            struct stat st;
+            if (snprintf(p, sizeof p, "%s/%s", dir, de->d_name) >= (int)sizeof p)
+                continue;
+            if (stat(p, &st) != 0 || !S_ISREG(st.st_mode))
+                continue;
+
+            total += st.st_size;
+            if (!oldest[0] || st.st_mtime < oldest_t) {
+                oldest_t = st.st_mtime;
+                snprintf(oldest, sizeof oldest, "%s", p);
+            }
+        }
+        closedir(dp);
+
+        if (total + need <= budget || !oldest[0])
+            return;
+
+        LOG("kes: izbacujem %s", path_base(oldest));
+        if (unlink(oldest) != 0)
+            return;
+    }
+}
+
+/* Velicina fajla na serveru, ili -1. Treba je cache_evict prije nego sto
+ * preuzimanje pocne, da se ne krene pa stane bez prostora.
+ * HEAD ide kroz CURLOPT_NOBODY, ne kroz CUSTOMREQUEST - inace curl i dalje
+ * ceka tijelo odgovora. */
+static int64_t remote_size(http_priv_t *p, const char *url, long *code_out)
+{
+    CURL *c = curl_easy_init();
+    if (!c)
+        return -1;
+
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_NOBODY, 1L);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    if (p->user[0]) {
+        curl_easy_setopt(c, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
+        curl_easy_setopt(c, CURLOPT_USERNAME, p->user);
+        curl_easy_setopt(c, CURLOPT_PASSWORD, p->pass);
+    }
+
+    int64_t sz   = -1;
+    long    code = -1;
+    if (curl_easy_perform(c) == CURLE_OK) {
+        curl_off_t cl = -1;
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+        curl_easy_getinfo(c, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+        if (cl > 0)
+            sz = (int64_t)cl;
+    }
+    curl_easy_cleanup(c);
+
+    if (code_out)
+        *code_out = code;
+    return sz;
+}
+
+typedef struct {
+    src_progress_fn cb;
+    void           *ud;
+    int64_t         base;      /* vec preuzeto prije nastavka */
+} prog_t;
+
+static int xferinfo(void *ud, curl_off_t dltotal, curl_off_t dlnow,
+                    curl_off_t ultotal, curl_off_t ulnow)
+{
+    (void)ultotal; (void)ulnow;
+    prog_t *p = ud;
+    if (!p->cb)
+        return 0;
+    return p->cb(p->ud, p->base + (int64_t)dlnow, p->base + (int64_t)dltotal);
+}
+
+/* 0 = spremno, -1 = greska, 1 = korisnik otkazao. */
+static int http_download(source_t *s, const char *url, char *local, size_t len,
+                         src_progress_fn cb, void *ud)
+{
+    http_priv_t *p = s->priv;
+
+    cache_name(url, local, len);
+
+    long    code = 0;
+    int64_t want = remote_size(p, url, &code);
+
+    if (code == 401 || code == 403) {
+        snprintf(s->err, sizeof s->err,
+                 "%ld - provjeri user/pass u .ps5cr.conf", code);
+        return -1;
+    }
+    if (code == 404) {
+        snprintf(s->err, sizeof s->err, "404 - fajl ne postoji");
+        return -1;
+    }
+
+    /* Vec preuzet u cijelosti? Onda nema sta da se radi. */
+    struct stat st;
+    if (stat(local, &st) == 0 && S_ISREG(st.st_mode) &&
+        want > 0 && st.st_size == want) {
+        LOG("kes: %s vec preuzet", path_base(local));
+        return 0;
+    }
+
+    int64_t have = 0;
+    if (stat(local, &st) == 0 && S_ISREG(st.st_mode))
+        have = st.st_size;
+
+    CURL *c = curl_easy_init();
+    if (!c) {
+        snprintf(s->err, sizeof s->err, "curl init");
+        return -1;
+    }
+
+    FILE *f = NULL;
+    if (have > 0 && want > 0 && have < want) {
+        /* Nastavak prekinutog preuzimanja - za 780 MB preko WiFi-ja ovo je
+         * razlika izmedju smetnje i pocinjanja iz pocetka. */
+        f = fopen(local, "ab");
+        curl_easy_setopt(c, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)have);
+        LOG("nastavljam preuzimanje od %lld B", (long long)have);
+    } else {
+        char dir[LIB_PATH_MAX];
+        cache_dir(dir, sizeof dir);
+        cache_evict(dir, cache_budget(dir, p->cache_mb), want > 0 ? want : 0);
+        f    = fopen(local, "wb");
+        have = 0;
+    }
+
+    if (!f) {
+        curl_easy_cleanup(c);
+        snprintf(s->err, sizeof s->err, "ne mogu da pisem u kes");
+        return -1;
+    }
+
+    prog_t pr = { cb, ud, have };
+
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 20L);
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, xferinfo);
+    curl_easy_setopt(c, CURLOPT_XFERINFODATA, &pr);
+
+    if (p->user[0]) {
+        curl_easy_setopt(c, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
+        curl_easy_setopt(c, CURLOPT_USERNAME, p->user);
+        curl_easy_setopt(c, CURLOPT_PASSWORD, p->pass);
+    }
+
+    CURLcode rc = curl_easy_perform(c);
+    fclose(f);
+    curl_easy_cleanup(c);
+
+    if (rc == CURLE_ABORTED_BY_CALLBACK) {
+        LOG("preuzimanje otkazano, djelimican fajl ostaje za nastavak");
+        return 1;
+    }
+    if (rc != CURLE_OK) {
+        snprintf(s->err, sizeof s->err, "%s", curl_easy_strerror(rc));
+        return -1;
+    }
+    return 0;
+}
+
 static int http_fetch(source_t *s, const char *path, char *local, size_t len,
                       src_progress_fn cb, void *ud)
 {
-    (void)path; (void)local; (void)len; (void)cb; (void)ud;
-    snprintf(s->err, sizeof s->err, "citanje preko mreze jos nije implementirano");
-    return -1;
+    http_priv_t *p = s->priv;
+
+    s->err[0] = '\0';
+
+    /* PDF i sve sto nije arhiva - uvijek download, jer streaming ide kroz
+     * libarchive callback-ove koje ima samo doc_archive.c. */
+    if (!is_archive_path(path))
+        return http_download(s, path, local, len, cb, ud);
+
+    /* Podrzava li server Range? Jedan zahtjev od jednog bajta je dovoljan. */
+    membuf_t mb   = { NULL, 0 };
+    CURL    *c    = curl_easy_init();
+    long     code = 0;
+
+    if (c) {
+        curl_easy_setopt(c, CURLOPT_URL, path);
+        curl_easy_setopt(c, CURLOPT_RANGE, "0-0");
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, sink);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &mb);
+        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 5L);
+        curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+        if (p->user[0]) {
+            curl_easy_setopt(c, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
+            curl_easy_setopt(c, CURLOPT_USERNAME, p->user);
+            curl_easy_setopt(c, CURLOPT_PASSWORD, p->pass);
+        }
+        if (curl_easy_perform(c) == CURLE_OK)
+            curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+        curl_easy_cleanup(c);
+    }
+    free(mb.buf);
+
+    if (code == 206) {
+        /* Stream: cache_open dobija sam URL, disk se ne dira. */
+        snprintf(local, len, "%s", path);
+        return 0;
+    }
+
+    LOG("server ne podrzava Range (status %ld), prelazim na pun download", code);
+    return http_download(s, path, local, len, cb, ud);
 }
 
 static void http_close(source_t *s)
