@@ -74,13 +74,24 @@ Pa Home ekran → Homebrew Loader → ComicReader.
 
 ### Zavisnosti koje moraš sam cross-kompajlirati
 
-| Biblioteka | Obavezna | Napomena |
+| Biblioteka | Obavezna | Licenca | Napomena |
+|---|---|---|---|
+| SDL2 | da | zlib | postoji kao port u `ps5-payload-dev` |
+| libarchive | da | BSD-2-Clause | traži zlib, bzip2, xz |
+| libcurl | da | curl (MIT-oid) | mrežni izvor; traži `-DCURL_STATICLIB` |
+| libxml2 | da | MIT | PROPFIND parser |
+| libwebp | da | BSD-3-Clause | WebP stranice; na PS5 uvijek uključen |
+| MuPDF | ne | **AGPL-3.0** ili komercijalna | samo za `WITH_PDF=1` — vidi *Licenca* |
+
+### Header-only zavisnosti
+
+Dovlači ih `scripts/deps.sh`; namjerno se ne čuvaju u repou, ali se kompajliraju
+u binarni build.
+
+| Zaglavlje | Licenca | Izvor |
 |---|---|---|
-| SDL2 | da | postoji kao port u `ps5-payload-dev` |
-| libarchive | da | traži zlib, bzip2, xz |
-| libcurl | da | mrežni izvor; traži `-DCURL_STATICLIB` |
-| libxml2 | da | PROPFIND parser |
-| MuPDF | ne | samo za `WITH_PDF=1` |
+| `stb_image.h` | MIT ili Unlicense (dual) | [nothings/stb](https://github.com/nothings/stb) |
+| `font8x8_basic.h` | Public Domain | [dhepper/font8x8](https://github.com/dhepper/font8x8) |
 
 Za host build i testove zaglavlja se dovlače bez root privilegija:
 
@@ -200,3 +211,16 @@ Pozicija čitanja se pamti u `.ps5cr_state` u korenu USB-a.
   napretka i otkazivanje. Svako sledeće otvaranje istog stripa dok aplikacija radi je
   trenutno, jer se zaglavlja keširaju.
 - Paralelni zahtevi ne pomažu — mereno, osam veza je 2.5× sporije od jedne na TS-228
+
+## Licenca
+
+MIT — vidi [`LICENSE`](LICENSE). Kod možeš koristiti, mijenjati i distribuirati,
+uključujući i komercijalno, uz zadržavanje obavještenja o autorskim pravima.
+
+Jedna zamka pri distribuciji binarnog build-a: **MuPDF je AGPL-3.0**. Sve dok
+gradiš bez `WITH_PDF=1`, ne dodiruje te. Ako objaviš binarni build sa uključenim
+PDF backend-om, AGPL uslovi hvataju cjelinu i moraš uz njega ponuditi izvorni kod
+— uključujući i ovaj. Za PDF bez te obaveze, konvertuj PDF u CBZ prije čitanja.
+
+Ostale zavisnosti su permisivne (zlib, BSD, MIT) i traže samo zadržavanje
+njihovih obavještenja u distribuciji.
