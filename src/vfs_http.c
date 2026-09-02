@@ -9,6 +9,7 @@
 #include "common.h"
 
 #include <curl/curl.h>
+#include <unistd.h>
 
 #define VH_CHUNK_MIN (4 * 1024)
 #define VH_CHUNK_MAX (1024 * 1024)
@@ -20,6 +21,9 @@
  * 8 MB cetvorostruka rezerva. */
 #define VH_CACHE_MAX_CHUNK (64 * 1024)
 #define VH_CACHE_BUDGET    (8 * 1024 * 1024)
+
+#define VH_RETRIES  3
+#define VH_CRED_MAX 8
 
 struct vfs_http {
     char     url[VH_URL_MAX];
@@ -47,6 +51,38 @@ struct vfs_http {
     size_t   cache_bytes;
     long     hits, misses;
 };
+
+/* ------------------------------------------------------------------ */
+/* Kredencijali. Namjerno van URL-a - vidi vfs_http.h.                  */
+
+static struct {
+    char prefix[VH_URL_MAX];
+    char user[64];
+    char pass[64];
+} g_creds[VH_CRED_MAX];
+static int g_n_creds;
+
+void vfs_http_register(const char *url_prefix, const char *user, const char *pass)
+{
+    if (!url_prefix || !user || !*user)
+        return;
+    if (g_n_creds >= VH_CRED_MAX) {
+        ERR("vfs_http: tabela kredencijala je puna");
+        return;
+    }
+    snprintf(g_creds[g_n_creds].prefix, sizeof g_creds[0].prefix, "%s", url_prefix);
+    snprintf(g_creds[g_n_creds].user,   sizeof g_creds[0].user,   "%s", user);
+    snprintf(g_creds[g_n_creds].pass,   sizeof g_creds[0].pass,   "%s", pass ? pass : "");
+    g_n_creds++;
+    /* Lozinka se namjerno ne loguje. */
+    LOG("vfs_http: kredencijali za %s", url_prefix);
+}
+
+void vfs_http_clear_creds(void)
+{
+    memset(g_creds, 0, sizeof g_creds);
+    g_n_creds = 0;
+}
 
 typedef struct {
     vfs_http_t *v;
@@ -136,37 +172,76 @@ void vfs_http_cache_stats(const vfs_http_t *v, long *hits, long *misses)
     if (misses) *misses = v ? v->misses : 0;
 }
 
-/* Jedan Range GET. 0 = uspjeh, -1 = greska. */
+/* Greske koje vrijedi ponoviti: kratak pad veze, zastoj, polovican
+ * odgovor. Trajne (401/403/404) se NE ponavljaju - ponavljanje ih samo
+ * odlaze i trosi vrijeme. */
+static int curl_err_transient(CURLcode rc)
+{
+    switch (rc) {
+    case CURLE_COULDNT_CONNECT:
+    case CURLE_OPERATION_TIMEDOUT:
+    case CURLE_RECV_ERROR:
+    case CURLE_SEND_ERROR:
+    case CURLE_PARTIAL_FILE:
+    case CURLE_GOT_NOTHING:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Jedan Range GET, uz do VH_RETRIES pokusaja. 0 = uspjeh, -1 = greska. */
 static int fetch_range(vfs_http_t *v, int64_t off, size_t len)
 {
+    static const int backoff_ms[VH_RETRIES] = { 500, 2000, 5000 };
+
     char range[64];
     snprintf(range, sizeof range, "%lld-%lld",
              (long long)off, (long long)(off + (int64_t)len - 1));
 
-    sink_t s = { v, 0 };
+    for (int try = 0; try < VH_RETRIES; try++) {
+        sink_t s = { v, 0 };
 
-    curl_easy_setopt(v->curl, CURLOPT_URL, v->url);
-    curl_easy_setopt(v->curl, CURLOPT_RANGE, range);
-    curl_easy_setopt(v->curl, CURLOPT_WRITEFUNCTION, sink_write);
-    curl_easy_setopt(v->curl, CURLOPT_WRITEDATA, &s);
+        curl_easy_setopt(v->curl, CURLOPT_URL, v->url);
+        curl_easy_setopt(v->curl, CURLOPT_RANGE, range);
+        curl_easy_setopt(v->curl, CURLOPT_WRITEFUNCTION, sink_write);
+        curl_easy_setopt(v->curl, CURLOPT_WRITEDATA, &s);
 
-    CURLcode rc = curl_easy_perform(v->curl);
-    v->requests++;
+        CURLcode rc = curl_easy_perform(v->curl);
+        v->requests++;
 
-    if (rc != CURLE_OK) {
-        ERR("vfs_http: %s (offset %lld)", curl_easy_strerror(rc), (long long)off);
-        return -1;
+        long code = 0;
+        if (rc == CURLE_OK)
+            curl_easy_getinfo(v->curl, CURLINFO_RESPONSE_CODE, &code);
+
+        if (rc == CURLE_OK && (code == 206 || code == 200)) {
+            v->buf_len = s.len;
+            return 0;
+        }
+
+        if (rc == CURLE_OK && (code == 401 || code == 403 || code == 404)) {
+            ERR("vfs_http: HTTP %ld, ne ponavljam", code);
+            return -1;
+        }
+
+        int retryable = (rc != CURLE_OK && curl_err_transient(rc)) ||
+                        (rc == CURLE_OK && code >= 500);
+        if (!retryable) {
+            ERR("vfs_http: %s (HTTP %ld) na offsetu %lld",
+                curl_easy_strerror(rc), code, (long long)off);
+            return -1;
+        }
+
+        if (try + 1 < VH_RETRIES) {
+            LOG("vfs_http: smetnja na offsetu %lld, pokusaj %d/%d za %d ms",
+                (long long)off, try + 2, VH_RETRIES, backoff_ms[try]);
+            usleep((useconds_t)backoff_ms[try] * 1000);
+        }
     }
 
-    long code = 0;
-    curl_easy_getinfo(v->curl, CURLINFO_RESPONSE_CODE, &code);
-    if (code != 206 && code != 200) {
-        ERR("vfs_http: HTTP %ld na offsetu %lld", code, (long long)off);
-        return -1;
-    }
-
-    v->buf_len = s.len;
-    return 0;
+    ERR("vfs_http: %d pokusaja nije uspjelo na offsetu %lld",
+        VH_RETRIES, (long long)off);
+    return -1;
 }
 
 /* HEAD, samo da se sazna velicina. Ako ne uspije, radi se i bez nje. */
@@ -218,6 +293,22 @@ vfs_http_t *vfs_http_new(const char *url)
     curl_easy_setopt(v->curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(v->curl, CURLOPT_FOLLOWLOCATION, 1L);
     /* Namjerno bez CURLOPT_TIMEOUT - ubijao bi legitimno spore prenose. */
+
+    /* Najduzi prefiks koji odgovara URL-u daje kredencijale. */
+    int    best = -1;
+    size_t bl   = 0;
+    for (int i = 0; i < g_n_creds; i++) {
+        size_t pl = strlen(g_creds[i].prefix);
+        if (!strncmp(v->url, g_creds[i].prefix, pl) && pl > bl) {
+            best = i;
+            bl   = pl;
+        }
+    }
+    if (best >= 0) {
+        curl_easy_setopt(v->curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
+        curl_easy_setopt(v->curl, CURLOPT_USERNAME, g_creds[best].user);
+        curl_easy_setopt(v->curl, CURLOPT_PASSWORD, g_creds[best].pass);
+    }
 
     return v;
 }

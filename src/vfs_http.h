@@ -31,4 +31,11 @@ long vfs_http_requests(const vfs_http_t *v);
 /* Statistika kesa malih citanja (spec 7.4). */
 void vfs_http_cache_stats(const vfs_http_t *v, long *hits, long *misses);
 
+/* Kredencijali se drze ovdje, a ne u URL-u: URL je kljuc u .ps5cr_state
+ * (spec 14) i lozinka bi zavrsila u citljivom tekstu na USB-u.
+ * Tabela se puni pri startu i poslije toga je samo za citanje, pa je
+ * dijeljenje medju nitima bezbjedno. */
+void vfs_http_register(const char *url_prefix, const char *user, const char *pass);
+void vfs_http_clear_creds(void);
+
 #endif /* VFS_HTTP_H */

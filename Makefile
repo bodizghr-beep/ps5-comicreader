@@ -31,6 +31,7 @@ SRCS := \
 	$(SRCDIR)/source_http.c \
 	$(SRCDIR)/dav_parse.c \
 	$(SRCDIR)/html_parse.c \
+	$(SRCDIR)/vfs_http.c \
 	$(SRCDIR)/cache.c \
 	$(SRCDIR)/doc.c \
 	$(SRCDIR)/doc_archive.c \

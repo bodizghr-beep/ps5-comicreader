@@ -5,6 +5,7 @@
  */
 #include "library.h"
 #include "config.h"
+#include "vfs_http.h"
 #include "common.h"
 
 #include <sys/stat.h>
@@ -173,6 +174,12 @@ int library_init(library_t *l)
     config_t cfg;
     if (config_find(cpath, sizeof cpath) == 0 && config_load(&cfg, cpath) == 0) {
         for (int i = 0; i < cfg.n_srcs; i++) {
+            /* Kredencijali idu u vfs_http tabelu, ne u URL: URL je kljuc u
+             * .ps5cr_state pa bi lozinka zavrsila na USB-u u citljivom tekstu. */
+            if (cfg.srcs[i].user[0])
+                vfs_http_register(cfg.srcs[i].url, cfg.srcs[i].user,
+                                  cfg.srcs[i].pass);
+
             source_t *s = source_http_new(cfg.srcs[i].name, cfg.srcs[i].url,
                                           cfg.srcs[i].type, cfg.srcs[i].user,
                                           cfg.srcs[i].pass, cfg.cache_mb);

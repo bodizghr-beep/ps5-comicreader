@@ -43,17 +43,26 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _fail_if_due(self):
+        """Ubacuje 503, ne prekid veze.
+
+        Prekid keep-alive veze NE valja kao injekcija greske: curl sam
+        ponovo salje zahtjev kad se perzistentna veza neocekivano zatvori,
+        pa bi greska bila nevidljiva klijentu i test ne bi testirao nista.
+        503 je deterministican i prolazi kroz curl do nas.
+        """
         if FAIL_EVERY <= 0:
             return False
         _count[0] += 1
-        if _count[0] % FAIL_EVERY == 0:
-            self.close_connection = True
-            try:
-                self.wfile.close()
-            except Exception:
-                pass
-            return True
-        return False
+        if _count[0] % FAIL_EVERY != 0:
+            return False
+
+        body = b"privremeno nedostupno"
+        self.send_response(503)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
 
     def do_PROPFIND(self):
         if self._fail_if_due():
