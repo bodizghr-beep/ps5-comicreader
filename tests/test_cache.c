@@ -44,7 +44,7 @@ int main(int argc, char **argv)
     if (ui_init(&ui, r, 640, 480) != 0)
         return 1;
 
-    cache_t *c = cache_open(argv[1], r);
+    cache_t *c = cache_open(argv[1], r, NULL, NULL);
     if (!c) {
         printf("FAIL: cache_open\n");
         return 1;

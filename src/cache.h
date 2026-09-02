@@ -12,9 +12,14 @@
 
 #include <SDL2/SDL.h>
 
+#include "doc.h"
+
 typedef struct cache cache_t;
 
-cache_t *cache_open(const char *path, SDL_Renderer *renderer);
+/* `cb` javlja napredak otvaranja i moze da ga prekine (vidi doc.h); smije
+ * biti NULL. Zove se iz niti koja zove cache_open, ne iz radne niti. */
+cache_t *cache_open(const char *path, SDL_Renderer *renderer,
+                    doc_progress_fn cb, void *ud);
 void     cache_close(cache_t *c);
 
 int cache_page_count(cache_t *c);

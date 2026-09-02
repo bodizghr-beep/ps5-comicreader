@@ -30,8 +30,13 @@ static int pb_probe(const char *path)
     return !strcasecmp(path_ext(path), "pdf");
 }
 
-static doc_t *pb_open(const char *path)
+/* PDF nikad ne ide stream putem - source_http.c ga uvijek preuzme do kraja,
+ * pa je otvaranje lokalno i trenutno. Napredak nema sta da javi. */
+static doc_t *pb_open(const char *path, doc_progress_fn cb, void *ud)
 {
+    (void)cb;
+    (void)ud;
+
     doc_t *d = calloc(1, sizeof(*d));
     if (!d)
         return NULL;

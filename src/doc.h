@@ -18,14 +18,24 @@ typedef struct {
 
 typedef struct doc doc_t;
 
+/* Napredak otvaranja. Kod mrezne arhive setnja kroz zaglavlja traje i po
+ * minut, pa UI treba nesto da nacrta i priliku da to prekine.
+ *   pos    - dokle se stiglo (bajt u fajlu); ne opada
+ *   total  - velicina fajla, ili 0 ako se ne zna
+ *   pages  - koliko je stranica do sada nadjeno
+ * Povratna vrijednost != 0 prekida otvaranje; `open` tada vraca NULL.
+ * Isti oblik kao src_progress_fn u source.h. */
+typedef int (*doc_progress_fn)(void *ud, int64_t pos, int64_t total, int pages);
+
 typedef struct {
     const char *name;
 
     /* Vraca 1 ako backend prepoznaje ekstenziju. */
     int (*probe)(const char *path);
 
-    /* Otvara dokument. NULL u slucaju greske. */
-    doc_t *(*open)(const char *path);
+    /* Otvara dokument. NULL u slucaju greske ili prekida.
+     * `cb` smije biti NULL. */
+    doc_t *(*open)(const char *path, doc_progress_fn cb, void *ud);
 
     int (*page_count)(doc_t *d);
 

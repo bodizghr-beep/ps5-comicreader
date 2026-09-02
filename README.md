@@ -21,7 +21,7 @@ tačna struktura direktorija su u `SETUP.md`.
 ## Arhitektura
 
 ```
-main.c        petlja, unos sa kontrolera, tri ekrana (lista / čitač / preuzimanje)
+main.c        petlja, unos sa kontrolera, tri ekrana (lista / čitač / priprema)
 ui.c          8x8 bitmap font, paleta, crtanje
 splash.c      startni ekran dok teku skeniranje USB-a i čitanje configa
 library.c     navigacijski stek kroz foldere, pamćenje pozicije čitanja
@@ -132,6 +132,24 @@ Arhive se čitaju direktno preko mreže. PDF i serveri bez `Range` podrške idu 
 download u `/data/tmp/ps5cr/`, uz progres, otkazivanje Krugom i nastavak prekinutog
 preuzimanja. Keš je ograničen na manje od `cache_mb` i četvrtine slobodnog prostora.
 
+### Ekran pripreme
+
+I preuzimanje i otvaranje idu u istoj pozadinskoj niti, pa glavna petlja crta i prima
+unos cijelo vrijeme. Ranije je otvaranje bilo u glavnoj niti i držalo je zaključanom
+cijeli minut koliko traje šetnja kroz zaglavlja.
+
+Traka pri otvaranju prati `archive_read_header_position()` naspram veličine fajla.
+Sirovi offset čitača za to ne valja — mjereno na ZIP-u od 200 unosa, libarchive prvo
+pročita 47% s početka, skoči na kraj po central directory, pa se vrati na 2% i ide
+redom; traka po njemu bi išla unatrag. `header_position` je monotona, uzeta jednom po
+zaglavlju. Kod ZIP-a stane na ~90% (ostatak je central directory), kod CBR-a ide do
+kraja.
+
+Uz traku stoje ime stripa, broj do sada pronađenih stranica i gruba procjena
+preostalog vremena. Krug otkazuje. Prvih par sekundi — dok libarchive čita popis, prije
+prvog unosa — otkazivanje još nema gdje da se ubaci, pa ekran to i kaže umjesto da
+ponudi dugme koje ne radi.
+
 ## Splash ekran
 
 Dok teku skeniranje USB-a i čitanje configa stoji splash sa imenom, verzijom i porukom
@@ -178,6 +196,7 @@ Pozicija čitanja se pamti u `.ps5cr_state` u korenu USB-a.
   jak zum na PDF-u omekša tekst
 - Nema sortiranja liste po datumu ni pretrage
 - Prvo otvaranje mrežnog stripa traje oko minut (popis od 500 stranica je ~484 zahtjeva,
-  a QNAP-ov DAV vhost drži KeepAlive isključen pa svaki plaća novu vezu). Svako sledeće
-  otvaranje istog stripa dok aplikacija radi je trenutno, jer se zaglavlja keširaju.
+  a QNAP-ov DAV vhost drži KeepAlive isključen pa svaki plaća novu vezu) — uz traku
+  napretka i otkazivanje. Svako sledeće otvaranje istog stripa dok aplikacija radi je
+  trenutno, jer se zaglavlja keširaju.
 - Paralelni zahtevi ne pomažu — mereno, osam veza je 2.5× sporije od jedne na TS-228

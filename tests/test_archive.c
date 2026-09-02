@@ -40,7 +40,7 @@ int main(int argc, char **argv)
     }
     printf("backend: %s\n", be->name);
 
-    doc_t *d = be->open(argv[1]);
+    doc_t *d = be->open(argv[1], NULL, NULL);
     if (!d) {
         printf("FAIL: open\n");
         return 1;

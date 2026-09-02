@@ -21,17 +21,36 @@
 typedef enum { SCREEN_BROWSER, SCREEN_READER, SCREEN_FETCH } screen_t;
 typedef enum { FIT_SCREEN, FIT_WIDTH, FIT_HEIGHT, FIT_COUNT } fitmode_t;
 
-/* Posao preuzimanja. Zivi u app_t, a nit ga puni preko atomika. */
+/* Dvije faze posla: preuzimanje (samo kad server nema Range) i otvaranje
+ * dokumenta. Kod mrezne arhive u stream rezimu je prva trenutna, a druga
+ * traje i po minut - setnja kroz zaglavlja. */
+typedef enum { PHASE_DOWNLOAD, PHASE_OPEN } phase_t;
+
+/* Posao preuzimanja i otvaranja. Zivi u app_t, a nit ga puni preko atomika. */
 typedef struct {
     source_t    *src;
     lib_entry_t  entry;        /* kopija - nivo steka moze nestati dok nit radi */
     char         local[LIB_PATH_MAX];
     SDL_Thread  *thread;
     int          want_page;
+    /* Pocetak svake faze, za procjenu preostalog vremena. */
+    uint32_t     t_start;      /* preuzimanje */
+    uint32_t     t_open;       /* otvaranje */
 
     /* Napredak u KB, jer SDL_atomic_t nosi int. 782 MB / 1024 = 763k,
      * daleko od granice. */
     SDL_atomic_t got_kb, total_kb;
+
+    /* Faza otvaranja: dokle se stiglo u fajlu i koliko stranica je nadjeno. */
+    SDL_atomic_t phase;
+    SDL_atomic_t pos_kb, size_kb, pages;
+
+    /* Otvaranje ide u ovoj niti, pa glavna petlja moze da crta i prima Krug.
+     * Ranije je cache_open bio u glavnoj niti i drzao je zakljucanom. */
+    cache_t      *cache;
+    SDL_Renderer *renderer;    /* cache_open ga samo pamti; teksture pravi
+                                * cache_pump u glavnoj niti */
+
     SDL_atomic_t done, status, cancel;
 } fetch_job_t;
 
@@ -77,6 +96,13 @@ static void reader_close(app_t *a)
         a->fetch.thread = NULL;
     }
 
+    /* Nit je mogla stici da otvori dokument koji vise nikom ne treba.
+     * Zatvara se odavde, iz glavne niti, jer cache_close dira teksture. */
+    if (a->fetch.cache) {
+        cache_close(a->fetch.cache);
+        a->fetch.cache = NULL;
+    }
+
     if (a->cache) {
         state_save(&a->lib, a->cur_path, a->page);
         cache_close(a->cache);
@@ -95,14 +121,39 @@ static int fetch_progress(void *ud, int64_t got, int64_t total)
     return SDL_AtomicGet(&j->cancel);
 }
 
+/* Napredak otvaranja dokumenta; vraca != 0 da prekine (doc.h). */
+static int open_progress(void *ud, int64_t pos, int64_t total, int pages)
+{
+    fetch_job_t *j = ud;
+
+    SDL_AtomicSet(&j->pos_kb,  (int)(pos   / 1024));
+    SDL_AtomicSet(&j->size_kb, (int)(total / 1024));
+    SDL_AtomicSet(&j->pages,   pages);
+
+    return SDL_AtomicGet(&j->cancel);
+}
+
 static int fetch_thread(void *ud)
 {
     fetch_job_t *j = ud;
 
     int r = j->src->be->fetch(j->src, j->entry.path, j->local, sizeof j->local,
                               fetch_progress, j);
+    if (r != 0) {
+        SDL_AtomicSet(&j->status, r);
+        SDL_AtomicSet(&j->done, 1);
+        return 0;
+    }
 
-    SDL_AtomicSet(&j->status, r);
+    /* Otvaranje je ovdje, a ne u glavnoj niti, jer kod mrezne arhive traje
+     * koliko i setnja kroz zaglavlja - vidi PHASE_OPEN. */
+    j->t_open = SDL_GetTicks();
+    SDL_AtomicSet(&j->phase, PHASE_OPEN);
+
+    j->cache = cache_open(j->local, j->renderer, open_progress, j);
+    if (!j->cache)
+        SDL_AtomicSet(&j->status, SDL_AtomicGet(&j->cancel) ? 1 : -1);
+
     SDL_AtomicSet(&j->done, 1);
     return 0;
 }
@@ -119,12 +170,18 @@ static void reader_start(app_t *a, source_t *src, lib_entry_t *it, int want_page
     j->src       = src;
     j->entry     = *it;
     j->want_page = want_page;
+    j->renderer  = a->ui.r;
+    j->t_start   = SDL_GetTicks();
 
     SDL_AtomicSet(&j->done, 0);
     SDL_AtomicSet(&j->cancel, 0);
     SDL_AtomicSet(&j->status, 0);
     SDL_AtomicSet(&j->got_kb, 0);
     SDL_AtomicSet(&j->total_kb, 0);
+    SDL_AtomicSet(&j->phase, PHASE_DOWNLOAD);
+    SDL_AtomicSet(&j->pos_kb, 0);
+    SDL_AtomicSet(&j->size_kb, 0);
+    SDL_AtomicSet(&j->pages, 0);
 
     j->thread = SDL_CreateThread(fetch_thread, "fetch", j);
     if (!j->thread) {
@@ -143,9 +200,17 @@ static void reader_finish(app_t *a)
     j->thread = NULL;
 
     int status = SDL_AtomicGet(&j->status);
+
+    /* Krug je mogao stici tek posto je otvaranje proslo do kraja. */
+    if (status == 0 && SDL_AtomicGet(&j->cancel)) {
+        cache_close(j->cache);
+        j->cache = NULL;
+        status   = 1;
+    }
+
     if (status != 0) {
         if (status == 1)
-            LOG("preuzimanje otkazano");
+            LOG("otkazano");
         else
             ERR("ne mogu da pripremim %s: %s", j->entry.path,
                 j->src->err[0] ? j->src->err : "nepoznata greska");
@@ -153,12 +218,9 @@ static void reader_finish(app_t *a)
         return;
     }
 
-    a->cache = cache_open(j->local, a->ui.r);
-    if (!a->cache) {
-        ERR("ne mogu da otvorim %s", j->local);
-        a->screen = SCREEN_BROWSER;
-        return;
-    }
+    /* Nit je vec otvorila dokument. */
+    a->cache = j->cache;
+    j->cache = NULL;
 
     snprintf(a->cur_path,  sizeof a->cur_path,  "%s", j->entry.path);
     snprintf(a->cur_local, sizeof a->cur_local, "%s", j->local);
@@ -348,13 +410,24 @@ static void draw_browser(app_t *a)
     ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM, "%s", footer);
 }
 
+/* "jos ~2:05" iz proteklog vremena i napunjenosti trake. Ispod par procenata
+ * je broj besmislen, pa se tada ne pise nista. */
+static void eta_text(char *buf, size_t len, uint32_t elapsed_ms, double frac)
+{
+    buf[0] = '\0';
+    if (frac < 0.05 || frac >= 1.0 || elapsed_ms < 1000)
+        return;
+
+    int left = (int)((elapsed_ms / 1000.0) * (1.0 - frac) / frac + 0.5);
+    if (left > 0 && left < 3600)
+        snprintf(buf, len, "jos ~%d:%02d", left / 60, left % 60);
+}
+
 static void draw_fetch(app_t *a)
 {
-    ui_t        *ui = &a->ui;
-    fetch_job_t *j  = &a->fetch;
-
-    int got   = SDL_AtomicGet(&j->got_kb);
-    int total = SDL_AtomicGet(&j->total_kb);
+    ui_t        *ui    = &a->ui;
+    fetch_job_t *j     = &a->fetch;
+    int          phase = SDL_AtomicGet(&j->phase);
 
     ui_fill_rect(ui, 0, 0, ui->screen_w, ui->screen_h, COL_BG);
 
@@ -365,20 +438,56 @@ static void draw_fetch(app_t *a)
 
     int bar_w = ui->screen_w - 2 * PAD;
     int bar_y = ui->screen_h / 2 - 40;
+    int cur, total;
 
-    ui_fill_rect(ui, PAD, bar_y, bar_w, 28, COL_PANEL);
-    if (total > 0) {
-        int w = (int)((int64_t)bar_w * got / total);
-        ui_fill_rect(ui, PAD, bar_y, w, 28, COL_SEL);
+    if (phase == PHASE_OPEN) {
+        cur   = SDL_AtomicGet(&j->pos_kb);
+        total = SDL_AtomicGet(&j->size_kb);
+    } else {
+        cur   = SDL_AtomicGet(&j->got_kb);
+        total = SDL_AtomicGet(&j->total_kb);
     }
 
-    if (total > 0)
-        ui_text(ui, PAD, bar_y + 48, 2, COL_DIM, "%d / %d MB   %d%%",
-                got / 1024, total / 1024, (int)((int64_t)100 * got / total));
-    else
-        ui_text(ui, PAD, bar_y + 48, 2, COL_DIM, "%d MB", got / 1024);
+    double frac = (total > 0) ? (double)cur / (double)total : 0.0;
 
-    ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM, "Krug: otkazi");
+    ui_fill_rect(ui, PAD, bar_y, bar_w, 28, COL_PANEL);
+    if (frac > 0.0)
+        ui_fill_rect(ui, PAD, bar_y, (int)(bar_w * frac), 28, COL_SEL);
+
+    char eta[32];
+    eta[0] = '\0';
+
+    if (phase == PHASE_OPEN) {
+        int pages = SDL_AtomicGet(&j->pages);
+
+        eta_text(eta, sizeof eta, SDL_GetTicks() - j->t_open, frac);
+
+        if (pages > 0)
+            ui_text(ui, PAD, bar_y + 48, 2, COL_DIM, "%d stranica   %d%%",
+                    pages, (int)(100.0 * frac));
+        else
+            /* Prije prvog unosa libarchive cita popis na kraju arhive; tu
+             * jos nema sta da se prekine, pa se to i kaze. */
+            ui_text(ui, PAD, bar_y + 48, 2, COL_DIM, "Citam popis stranica...");
+    } else if (total > 0) {
+        eta_text(eta, sizeof eta, SDL_GetTicks() - j->t_start, frac);
+        ui_text(ui, PAD, bar_y + 48, 2, COL_DIM, "%d / %d MB   %d%%",
+                cur / 1024, total / 1024, (int)(100.0 * frac));
+    } else {
+        ui_text(ui, PAD, bar_y + 48, 2, COL_DIM, "%d MB", cur / 1024);
+    }
+
+    if (eta[0])
+        ui_text(ui, ui->screen_w - PAD - ui_text_width(2, eta), bar_y + 48, 2,
+                COL_DIM, "%s", eta);
+
+    /* Dok otvaranje jos nije naslo prvi unos, Krug nema gdje da se ubaci.
+     * Bez ove poruke bi izgledalo kao da dugme ne radi. */
+    if (phase == PHASE_OPEN && SDL_AtomicGet(&j->pages) == 0)
+        ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM,
+                "Otkazivanje moguce cim popis krene");
+    else
+        ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM, "Krug: otkazi");
 }
 
 static void draw_reader(app_t *a)

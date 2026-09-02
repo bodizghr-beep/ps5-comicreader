@@ -99,6 +99,22 @@ static uint8_t *decode_image(const uint8_t *raw, size_t len, int *w, int *h,
     return px;
 }
 
+/* Je li ovaj unos stranica stripa? Izdvojeno iz petlje popisa da javljanje
+ * napretka ne bi zavisilo od toga koji je filter preskocio unos. */
+static int entry_is_page(struct archive_entry *e, const char *name)
+{
+    if (!name)
+        return 0;
+    if (archive_entry_filetype(e) != AE_IFREG)
+        return 0;
+    if (!is_image_ext(path_ext(name)))
+        return 0;
+    /* macOS smece koje se cesto nadje u CBZ-ovima */
+    if (strstr(name, "__MACOSX") || path_base(name)[0] == '.')
+        return 0;
+    return 1;
+}
+
 static int entry_sort_cb(const void *a, const void *b)
 {
     return natural_cmp(((const entry_t *)a)->name, ((const entry_t *)b)->name);
@@ -246,7 +262,7 @@ static int ab_probe(const char *path)
     return is_archive_ext(path_ext(path));
 }
 
-static doc_t *ab_open(const char *path)
+static doc_t *ab_open(const char *path, doc_progress_fn cb, void *ud)
 {
     struct archive_entry *e;
 
@@ -271,37 +287,58 @@ static doc_t *ab_open(const char *path)
         return NULL;
     }
 
+    /* Velicina fajla je poznata samo kod mrezne arhive; lokalno otvaranje je
+     * ionako trenutno, pa traka nema kome da treba. */
+    int64_t total = d->vh ? vfs_http_size(d->vh) : 0;
+    int     stop  = 0;
+
     while (archive_read_next_header(a, &e) == ARCHIVE_OK) {
         const char *name = archive_entry_pathname(e);
         int this_ord = ord++;
 
-        if (!name)
-            continue;
-        if (archive_entry_filetype(e) != AE_IFREG)
-            continue;
-        if (!is_image_ext(path_ext(name)))
-            continue;
-        /* macOS smece koje se cesto nadje u CBZ-ovima */
-        if (strstr(name, "__MACOSX") || path_base(name)[0] == '.')
-            continue;
-
-        if (d->n_entries == cap) {
-            cap *= 2;
-            entry_t *ne = realloc(d->entries, (size_t)cap * sizeof(entry_t));
-            if (!ne)
-                break;
-            d->entries = ne;
+        if (entry_is_page(e, name)) {
+            if (d->n_entries == cap) {
+                cap *= 2;
+                entry_t *ne = realloc(d->entries, (size_t)cap * sizeof(entry_t));
+                if (!ne)
+                    break;
+                d->entries = ne;
+            }
+            d->entries[d->n_entries].name = strdup(name);
+            d->entries[d->n_entries].ord  = this_ord;
+            d->n_entries++;
         }
-        d->entries[d->n_entries].name = strdup(name);
-        d->entries[d->n_entries].ord  = this_ord;
-        d->n_entries++;
+
+        /* Javlja se na svako zaglavlje, i za unose koji nisu stranice - inace
+         * bi traka stajala kroz arhivu punu necega drugog.
+         * Mjereno (200 unosa preko HTTP-a): header_position raste monotono,
+         * dok sirovi offset citaca skoci na kraj fajla po central directory
+         * pa se vrati na pocetak - traka po njemu bi isla unatrag. */
+        if (cb && cb(ud, archive_read_header_position(a), total, d->n_entries)) {
+            LOG("%s: otvaranje prekinuto na %d stranica", path_base(path),
+                d->n_entries);
+            stop = 1;
+            break;
+        }
     }
 
     archive_read_free(a);
 
+    if (stop) {
+        for (int i = 0; i < d->n_entries; i++)
+            free(d->entries[i].name);
+        free(d->entries);
+        if (d->vh)
+            vfs_http_free(d->vh);
+        free(d);
+        return NULL;
+    }
+
     if (d->n_entries == 0) {
         ERR("%s: nema prepoznatih slika", path);
         free(d->entries);
+        if (d->vh)
+            vfs_http_free(d->vh);
         free(d);
         return NULL;
     }

@@ -136,7 +136,8 @@ static int worker_fn(void *arg)
 
 /* ------------------------------------------------------------------ */
 
-cache_t *cache_open(const char *path, SDL_Renderer *renderer)
+cache_t *cache_open(const char *path, SDL_Renderer *renderer,
+                    doc_progress_fn cb, void *ud)
 {
     const doc_backend_t *be = doc_backend_for(path);
     if (!be) {
@@ -150,7 +151,7 @@ cache_t *cache_open(const char *path, SDL_Renderer *renderer)
 
     c->be       = be;
     c->renderer = renderer;
-    c->doc      = be->open(path);
+    c->doc      = be->open(path, cb, ud);
     if (!c->doc) {
         free(c);
         return NULL;
