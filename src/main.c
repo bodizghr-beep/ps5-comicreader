@@ -17,7 +17,7 @@
 #define STICK_DEAD   9000
 #define PAN_SPEED    1400.0f /* piksela u sekundi pri punom otklonu */
 
-typedef enum { SCREEN_BROWSER, SCREEN_READER } screen_t;
+typedef enum { SCREEN_BROWSER, SCREEN_READER, SCREEN_FETCH } screen_t;
 typedef enum { FIT_SCREEN, FIT_WIDTH, FIT_HEIGHT, FIT_COUNT } fitmode_t;
 
 static const SDL_Color COL_BG     = {  18,  18,  20, 255 };
@@ -27,6 +27,20 @@ static const SDL_Color COL_TEXT   = { 232, 232, 236, 255 };
 static const SDL_Color COL_DIM    = { 140, 140, 148, 255 };
 static const SDL_Color COL_ACCENT = { 120, 176, 255, 255 };
 static const SDL_Color COL_HUD    = {   0,   0,   0, 170 };
+
+/* Posao preuzimanja. Zivi u app_t, a nit ga puni preko atomika. */
+typedef struct {
+    source_t    *src;
+    lib_entry_t  entry;        /* kopija - nivo steka moze nestati dok nit radi */
+    char         local[LIB_PATH_MAX];
+    SDL_Thread  *thread;
+    int          want_page;
+
+    /* Napredak u KB, jer SDL_atomic_t nosi int. 782 MB / 1024 = 763k,
+     * daleko od granice. */
+    SDL_atomic_t got_kb, total_kb;
+    SDL_atomic_t done, status, cancel;
+} fetch_job_t;
 
 typedef struct {
     ui_t      ui;
@@ -47,6 +61,10 @@ typedef struct {
     char      cur_path[LIB_PATH_MAX];    /* kljuc za state: putanja ili URL */
     char      cur_local[LIB_PATH_MAX];   /* ono sto je dobio cache_open */
 
+    fetch_job_t  fetch;
+    source_t    *cur_src;                /* izvor tekuceg dokumenta */
+    lib_entry_t  cur_entry;              /* za ponovno otvaranje poslije pada veze */
+
     int running;
 } app_t;
 
@@ -59,6 +77,13 @@ static void hud_bump(app_t *a)
 
 static void reader_close(app_t *a)
 {
+    /* Nit ne smije ostati da pise u a->fetch.local poslije gasenja. */
+    if (a->fetch.thread) {
+        SDL_AtomicSet(&a->fetch.cancel, 1);
+        SDL_WaitThread(a->fetch.thread, NULL);
+        a->fetch.thread = NULL;
+    }
+
     if (a->cache) {
         state_save(&a->lib, a->cur_path, a->page);
         cache_close(a->cache);
@@ -66,35 +91,95 @@ static void reader_close(app_t *a)
     }
 }
 
-static void reader_open(app_t *a, source_t *src, lib_entry_t *it, int want_page)
+static int fetch_progress(void *ud, int64_t got, int64_t total)
 {
-    char local[LIB_PATH_MAX];
+    fetch_job_t *j = ud;
+
+    SDL_AtomicSet(&j->got_kb,   (int)(got   / 1024));
+    SDL_AtomicSet(&j->total_kb, (int)(total / 1024));
+
+    /* !=0 prekida curl. Krug postavlja cancel iz glavne niti. */
+    return SDL_AtomicGet(&j->cancel);
+}
+
+static int fetch_thread(void *ud)
+{
+    fetch_job_t *j = ud;
+
+    int r = j->src->be->fetch(j->src, j->entry.path, j->local, sizeof j->local,
+                              fetch_progress, j);
+
+    SDL_AtomicSet(&j->status, r);
+    SDL_AtomicSet(&j->done, 1);
+    return 0;
+}
+
+/* Oba izvora idu istim putem kroz nit. Za USB je fetch identitet, pa se
+ * SCREEN_FETCH vidi jedan frejm ili nijedan - jedna grana umjesto dvije. */
+static void reader_start(app_t *a, source_t *src, lib_entry_t *it, int want_page)
+{
+    fetch_job_t *j = &a->fetch;
 
     reader_close(a);
 
-    /* Za USB je ovo identitet; mrezni izvor ovdje vraca URL ili lokalnu kopiju. */
-    if (src->be->fetch(src, it->path, local, sizeof local, NULL, NULL) != 0) {
-        ERR("ne mogu da pripremim %s", it->path);
+    memset(j, 0, sizeof *j);
+    j->src       = src;
+    j->entry     = *it;
+    j->want_page = want_page;
+
+    SDL_AtomicSet(&j->done, 0);
+    SDL_AtomicSet(&j->cancel, 0);
+    SDL_AtomicSet(&j->status, 0);
+    SDL_AtomicSet(&j->got_kb, 0);
+    SDL_AtomicSet(&j->total_kb, 0);
+
+    j->thread = SDL_CreateThread(fetch_thread, "fetch", j);
+    if (!j->thread) {
+        ERR("SDL_CreateThread: %s", SDL_GetError());
         return;
     }
 
-    a->cache = cache_open(local, a->ui.r);
+    a->screen = SCREEN_FETCH;
+}
+
+static void reader_finish(app_t *a)
+{
+    fetch_job_t *j = &a->fetch;
+
+    SDL_WaitThread(j->thread, NULL);
+    j->thread = NULL;
+
+    int status = SDL_AtomicGet(&j->status);
+    if (status != 0) {
+        if (status == 1)
+            LOG("preuzimanje otkazano");
+        else
+            ERR("ne mogu da pripremim %s: %s", j->entry.path,
+                j->src->err[0] ? j->src->err : "nepoznata greska");
+        a->screen = SCREEN_BROWSER;
+        return;
+    }
+
+    a->cache = cache_open(j->local, a->ui.r);
     if (!a->cache) {
-        ERR("ne mogu da otvorim %s", local);
+        ERR("ne mogu da otvorim %s", j->local);
+        a->screen = SCREEN_BROWSER;
         return;
     }
 
-    snprintf(a->cur_path,  sizeof a->cur_path,  "%s", it->path);
-    snprintf(a->cur_local, sizeof a->cur_local, "%s", local);
+    snprintf(a->cur_path,  sizeof a->cur_path,  "%s", j->entry.path);
+    snprintf(a->cur_local, sizeof a->cur_local, "%s", j->local);
+    a->cur_src   = j->src;
+    a->cur_entry = j->entry;
 
     a->n_pages = cache_page_count(a->cache);
 
-    int p = (want_page >= 0) ? want_page : it->last_page;
-    a->page    = (p > 0 && p < a->n_pages) ? p : 0;
-    a->fit     = FIT_SCREEN;
-    a->zoom    = 1.0f;
-    a->pan_x   = a->pan_y = 0.0f;
-    a->screen  = SCREEN_READER;
+    int p = (j->want_page >= 0) ? j->want_page : j->entry.last_page;
+    a->page   = (p > 0 && p < a->n_pages) ? p : 0;
+    a->fit    = FIT_SCREEN;
+    a->zoom   = 1.0f;
+    a->pan_x  = a->pan_y = 0.0f;
+    a->screen = SCREEN_READER;
 
     cache_focus(a->cache, a->page);
     hud_bump(a);
@@ -231,6 +316,39 @@ static void draw_browser(app_t *a)
     ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM, "%s", footer);
 }
 
+static void draw_fetch(app_t *a)
+{
+    ui_t        *ui = &a->ui;
+    fetch_job_t *j  = &a->fetch;
+
+    int got   = SDL_AtomicGet(&j->got_kb);
+    int total = SDL_AtomicGet(&j->total_kb);
+
+    ui_fill_rect(ui, 0, 0, ui->screen_w, ui->screen_h, COL_BG);
+
+    char title[LIB_TITLE_MAX + 8];
+    ui_ellipsize(title, sizeof title, j->entry.name,
+                 (ui->screen_w - 2 * PAD) / (8 * 3));
+    ui_text(ui, PAD, ui->screen_h / 2 - 120, 3, COL_TEXT, "%s", title);
+
+    int bar_w = ui->screen_w - 2 * PAD;
+    int bar_y = ui->screen_h / 2 - 40;
+
+    ui_fill_rect(ui, PAD, bar_y, bar_w, 28, COL_PANEL);
+    if (total > 0) {
+        int w = (int)((int64_t)bar_w * got / total);
+        ui_fill_rect(ui, PAD, bar_y, w, 28, COL_SEL);
+    }
+
+    if (total > 0)
+        ui_text(ui, PAD, bar_y + 48, 2, COL_DIM, "%d / %d MB   %d%%",
+                got / 1024, total / 1024, (int)((int64_t)100 * got / total));
+    else
+        ui_text(ui, PAD, bar_y + 48, 2, COL_DIM, "%d MB", got / 1024);
+
+    ui_text(ui, PAD, ui->screen_h - 56, 2, COL_DIM, "Krug: otkazi");
+}
+
 static void draw_reader(app_t *a)
 {
     ui_t *ui = &a->ui;
@@ -293,7 +411,7 @@ static void on_button(app_t *a, SDL_GameControllerButton b)
             if (lv->entries[lv->sel].is_dir)
                 library_enter(&a->lib, lv->sel);
             else
-                reader_open(a, lv->src, &lv->entries[lv->sel], -1);
+                reader_start(a, lv->src, &lv->entries[lv->sel], -1);
             break;
         case SDL_CONTROLLER_BUTTON_B:
             /* Krug izlazi iz nivoa; u korijenu gasi aplikaciju. */
@@ -303,6 +421,12 @@ static void on_button(app_t *a, SDL_GameControllerButton b)
         default:
             break;
         }
+        return;
+    }
+
+    if (a->screen == SCREEN_FETCH) {
+        if (b == SDL_CONTROLLER_BUTTON_B)
+            SDL_AtomicSet(&a->fetch.cancel, 1);
         return;
     }
 
@@ -495,8 +619,13 @@ int main(int argc, char **argv)
         if (a.cache)
             cache_pump(a.cache);
 
+        if (a.screen == SCREEN_FETCH && SDL_AtomicGet(&a.fetch.done))
+            reader_finish(&a);
+
         if (a.screen == SCREEN_BROWSER)
             draw_browser(&a);
+        else if (a.screen == SCREEN_FETCH)
+            draw_fetch(&a);
         else
             draw_reader(&a);
 
