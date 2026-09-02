@@ -79,10 +79,11 @@ test:
 	@test -n "$(FILE)" || (echo "zadaj FILE=<putanja do .cbz/.cbr>"; exit 1)
 	cc $(TEST_FLAGS) -o /tmp/cr_t_archive tests/test_archive.c \
 	   $(SRCDIR)/common.c $(SRCDIR)/doc.c $(SRCDIR)/doc_archive.c \
-	   $(SRCDIR)/stb_impl.c $(PKG_LIBS) -lm
+	   $(SRCDIR)/vfs_http.c $(SRCDIR)/stb_impl.c $(PKG_LIBS) -lm
 	cc $(TEST_FLAGS) -o /tmp/cr_t_cache tests/test_cache.c \
 	   $(SRCDIR)/common.c $(SRCDIR)/ui.c $(SRCDIR)/cache.c $(SRCDIR)/doc.c \
-	   $(SRCDIR)/doc_archive.c $(SRCDIR)/doc_pdf.c $(SRCDIR)/stb_impl.c $(PKG_LIBS) -lm
+	   $(SRCDIR)/doc_archive.c $(SRCDIR)/doc_pdf.c $(SRCDIR)/vfs_http.c \
+	   $(SRCDIR)/stb_impl.c $(PKG_LIBS) -lm
 	/tmp/cr_t_archive "$(FILE)"
 	SDL_VIDEODRIVER=dummy /tmp/cr_t_cache "$(FILE)"
 

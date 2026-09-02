@@ -11,6 +11,7 @@
  * otvaranje se u praksi desava samo kad korisnik skoci nazad.
  */
 #include "doc.h"
+#include "vfs_http.h"
 #include "common.h"
 
 #include <archive.h>
@@ -37,6 +38,8 @@ struct doc {
 
     struct archive *ar;     /* NULL kad je stream zatvoren */
     int             pos;    /* redni broj sledeceg zaglavlja koje ce se procitati */
+
+    vfs_http_t     *vh;     /* != NULL samo kad je path URL */
 };
 
 /* ------------------------------------------------------------------ */
@@ -103,7 +106,7 @@ static int entry_sort_cb(const void *a, const void *b)
 
 /* ------------------------------------------------------------------ */
 
-static struct archive *ar_open(const char *path)
+static struct archive *ar_open(doc_t *d, const char *path)
 {
     struct archive *a = archive_read_new();
     if (!a)
@@ -112,12 +115,52 @@ static struct archive *ar_open(const char *path)
     archive_read_support_filter_all(a);
     archive_read_support_format_all(a);
 
+    if (is_url(path)) {
+        /* Mrezna arhiva: libarchive cita Range zahtjevima. Skip callback nosi
+         * cijeli dobitak - preko njega se preskacu podaci unosa, pa se cita
+         * manje od 1% fajla. archive_read_open2 se NE koristi jer nema seek
+         * callback, a bez seek-a ZIP citac ne moze do EOCD-a.
+         *
+         * vfs_http_t se NAMJERNO ne pravi ponovo pri svakom ar_open(): u njemu
+         * je kes zaglavlja, a ar_seek_to() zove ar_open() na svaki skok
+         * unazad. Posto kes stranica trazi focus-1 pri svakom okretu, ponovno
+         * pravljenje bi rusilo kes bas na najcescoj putanji. Oslobadja se
+         * samo u ab_close(). */
+        if (!d->vh) {
+            d->vh = vfs_http_new(path);
+            if (!d->vh) {
+                archive_read_free(a);
+                return NULL;
+            }
+        }
+
+        archive_read_set_callback_data(a, d->vh);
+        archive_read_set_open_callback (a, vh_open);
+        archive_read_set_read_callback (a, vh_read);
+        archive_read_set_skip_callback (a, vh_skip);
+        archive_read_set_seek_callback (a, vh_seek);
+        archive_read_set_close_callback(a, vh_close);
+
+        if (archive_read_open1(a) != ARCHIVE_OK) {
+            ERR("archive_read_open1(%s): %s", path, archive_error_string(a));
+            archive_read_free(a);
+            return NULL;
+        }
+        return a;
+    }
+
     if (archive_read_open_filename(a, path, BLOCK_SIZE) != ARCHIVE_OK) {
         ERR("archive_read_open_filename(%s): %s", path, archive_error_string(a));
         archive_read_free(a);
         return NULL;
     }
     return a;
+}
+
+/* Samo za testove: koliko je HTTP zahtjeva poslao ovaj dokument. */
+long vfs_http_requests_of_doc(doc_t *d)
+{
+    return d && d->vh ? vfs_http_requests(d->vh) : 0;
 }
 
 static void ar_reset(doc_t *d)
@@ -135,7 +178,7 @@ static int ar_seek_to(doc_t *d, int ord, struct archive_entry **entry)
 {
     if (!d->ar || d->pos > ord) {
         ar_reset(d);
-        d->ar = ar_open(d->path);
+        d->ar = ar_open(d, d->path);
         if (!d->ar)
             return -1;
     }
@@ -205,18 +248,19 @@ static int ab_probe(const char *path)
 
 static doc_t *ab_open(const char *path)
 {
-    struct archive       *a = ar_open(path);
     struct archive_entry *e;
 
-    if (!a)
-        return NULL;
-
+    /* doc_t se alocira PRIJE ar_open jer ar_open drzi vfs_http_t u njemu. */
     doc_t *d = calloc(1, sizeof(*d));
-    if (!d) {
-        archive_read_free(a);
+    if (!d)
+        return NULL;
+    snprintf(d->path, sizeof(d->path), "%s", path);
+
+    struct archive *a = ar_open(d, path);
+    if (!a) {
+        free(d);
         return NULL;
     }
-    snprintf(d->path, sizeof(d->path), "%s", path);
 
     /* Prvi prolaz: popis slika i njihovih rednih brojeva. */
     int cap = 64, ord = 0;
@@ -311,6 +355,9 @@ static void ab_close(doc_t *d)
     if (!d)
         return;
     ar_reset(d);
+    /* vfs_http_t zivi koliko i doc_t, ne koliko jedan archive - vidi ar_open. */
+    if (d->vh)
+        vfs_http_free(d->vh);
     for (int i = 0; i < d->n_entries; i++)
         free(d->entries[i].name);
     free(d->entries);
