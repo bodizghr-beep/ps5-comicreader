@@ -362,8 +362,17 @@ static void draw_reader(app_t *a)
         SDL_Rect dst = page_rect(a, tw, th);
         SDL_RenderCopy(ui->r, t, NULL, &dst);
     } else if (cache_failed(a->cache, a->page)) {
-        ui_text(ui, PAD, ui->screen_h / 2, 3, COL_DIM,
-                "Stranica %d se ne moze prikazati", a->page + 1);
+        /* Kod mreznog izvora je pala veza daleko vjerovatnija od ostecene
+         * slike, a za razliku od nje je i rjesiva. */
+        if (a->cur_src && !strcmp(a->cur_src->be->kind, "http")) {
+            ui_text(ui, PAD, ui->screen_h / 2 - 30, 3, COL_TEXT,
+                    "Veza prekinuta");
+            ui_text(ui, PAD, ui->screen_h / 2 + 20, 2, COL_DIM,
+                    "Krst: pokusaj ponovo   Krug: nazad na listu");
+        } else {
+            ui_text(ui, PAD, ui->screen_h / 2, 3, COL_DIM,
+                    "Stranica %d se ne moze prikazati", a->page + 1);
+        }
     } else {
         /* Namerno bez animacije - prefetch obicno stigne pre nego sto se
          * ovo uopste primeti. */
@@ -434,8 +443,17 @@ static void on_button(app_t *a, SDL_GameControllerButton b)
     switch (b) {
     case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
     case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-    case SDL_CONTROLLER_BUTTON_A:
         reader_goto(a, a->page + 1);
+        break;
+    case SDL_CONTROLLER_BUTTON_A:
+        if (cache_failed(a->cache, a->page) && a->cur_src &&
+            !strcmp(a->cur_src->be->kind, "http")) {
+            /* Tekuca stranica, ne zapamcena - korisnik ne smije nazad na
+             * pocetak stripa od 500 stranica zbog jedne smetnje. */
+            reader_start(a, a->cur_src, &a->cur_entry, a->page);
+        } else {
+            reader_goto(a, a->page + 1);
+        }
         break;
     case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
     case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
