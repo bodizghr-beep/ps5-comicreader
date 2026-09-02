@@ -14,6 +14,13 @@ src/font8x8_basic.h
 # host testiranju; nije dio aplikacije
 splash.png
 
+# Kredencijali - nikad u repo
+.gh_token
+.qnap_cred
+.ps5cr.conf
+*.pem
+.netrc
+
 # Privremeno
 *.tmp
 *.log
