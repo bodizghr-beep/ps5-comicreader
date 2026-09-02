@@ -1,0 +1,31 @@
+/* vfs_http.h - libarchive izvor koji cita HTTP Range zahtjevima
+ *
+ * Postoji zbog jedne mjerene cinjenice: puna setnja kroz zaglavlja arhive
+ * od 782 MB trazi manje od 1% bajtova. Preuzimanje cijelog fajla prije prve
+ * stranice je zato cista steta.
+ */
+#ifndef VFS_HTTP_H
+#define VFS_HTTP_H
+
+#include <archive.h>
+#include <stdint.h>
+
+typedef struct vfs_http vfs_http_t;
+
+vfs_http_t *vfs_http_new(const char *url);
+void        vfs_http_free(vfs_http_t *v);
+
+/* libarchive callback-ovi. `a` smije biti NULL u testovima. */
+int        vh_open (struct archive *a, void *cd);
+la_ssize_t vh_read (struct archive *a, void *cd, const void **buf);
+la_int64_t vh_skip (struct archive *a, void *cd, la_int64_t req);
+la_int64_t vh_seek (struct archive *a, void *cd, la_int64_t off, int whence);
+int        vh_close(struct archive *a, void *cd);
+
+int64_t vfs_http_size(const vfs_http_t *v);
+
+/* Broj poslatih HTTP zahtjeva - testovi na ovome tvrde da skip i seek
+ * ne salju nista i da kes zaglavlja radi. */
+long vfs_http_requests(const vfs_http_t *v);
+
+#endif /* VFS_HTTP_H */
