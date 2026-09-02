@@ -74,23 +74,51 @@ host: $(SRCS)
 	cc $(BASE_CFLAGS) $(PKG_CFLAGS) -o comicreader $(SRCS) $(PKG_LIBS) $(PDF_LIBS) -lm
 
 TEST_FLAGS := $(BASE_CFLAGS) -g -fsanitize=address,undefined $(PKG_CFLAGS)
+TEST_CORE  := $(SRCDIR)/common.c $(SRCDIR)/source.c $(SRCDIR)/doc.c \
+              $(SRCDIR)/doc_archive.c $(SRCDIR)/vfs_http.c $(SRCDIR)/stb_impl.c
+TEST_NET   := $(SRCDIR)/source_http.c $(SRCDIR)/dav_parse.c $(SRCDIR)/html_parse.c
 
-test:
-	@test -n "$(FILE)" || (echo "zadaj FILE=<putanja do .cbz/.cbr>"; exit 1)
-	cc $(TEST_FLAGS) -o /tmp/cr_t_archive tests/test_archive.c \
-	   $(SRCDIR)/common.c $(SRCDIR)/doc.c $(SRCDIR)/doc_archive.c \
-	   $(SRCDIR)/vfs_http.c $(SRCDIR)/stb_impl.c $(PKG_LIBS) -lm
-	cc $(TEST_FLAGS) -o /tmp/cr_t_cache tests/test_cache.c \
-	   $(SRCDIR)/common.c $(SRCDIR)/ui.c $(SRCDIR)/cache.c $(SRCDIR)/doc.c \
-	   $(SRCDIR)/doc_archive.c $(SRCDIR)/doc_pdf.c $(SRCDIR)/vfs_http.c \
-	   $(SRCDIR)/stb_impl.c $(PKG_LIBS) -lm
-	/tmp/cr_t_archive "$(FILE)"
-	SDL_VIDEODRIVER=dummy /tmp/cr_t_cache "$(FILE)"
+# Zaglavlja za host build se dovlace bez root-a; vidi scripts/host_deps.sh.
+hostdeps:
+	@test -d "$(HOSTROOT)/root/usr/include" || scripts/host_deps.sh
+
+# `make test` pusta sve sto ne trazi stvarnu arhivu.
+# `make test FILE=x.cbz` dodaje jos i dva zatecena testa nad tim fajlom.
+test: hostdeps
+	cc $(TEST_FLAGS) -o /tmp/cr_t_common tests/test_common.c $(SRCDIR)/common.c
+	cc $(TEST_FLAGS) -o /tmp/cr_t_cfg    tests/test_config.c $(SRCDIR)/config.c $(SRCDIR)/common.c
+	cc $(TEST_FLAGS) -o /tmp/cr_t_usb    tests/test_source_usb.c $(SRCDIR)/source_usb.c $(TEST_CORE) $(PKG_LIBS) -lm
+	cc $(TEST_FLAGS) -o /tmp/cr_t_nav    tests/test_nav.c $(SRCDIR)/library.c $(SRCDIR)/config.c $(SRCDIR)/source_usb.c $(TEST_NET) $(TEST_CORE) $(PKG_LIBS) -lm
+	cc $(TEST_FLAGS) -o /tmp/cr_t_dav    tests/test_dav.c $(SRCDIR)/dav_parse.c $(TEST_CORE) $(PKG_LIBS) -lm
+	cc $(TEST_FLAGS) -o /tmp/cr_t_html   tests/test_html.c $(SRCDIR)/html_parse.c $(TEST_CORE) $(PKG_LIBS) -lm
+	cc $(TEST_FLAGS) -o /tmp/cr_t_hlist  tests/test_http_list.c $(TEST_NET) $(TEST_CORE) $(PKG_LIBS) -lm
+	cc $(TEST_FLAGS) -o /tmp/cr_t_hfetch tests/test_http_fetch.c $(TEST_NET) $(TEST_CORE) $(PKG_LIBS) -lm
+	cc $(TEST_FLAGS) -o /tmp/cr_t_vfs    tests/test_vfs_http.c $(SRCDIR)/vfs_http.c $(SRCDIR)/common.c $(PKG_LIBS) -lm
+	cc $(TEST_FLAGS) -o /tmp/cr_t_vcache tests/test_vfs_cache.c $(SRCDIR)/vfs_http.c $(SRCDIR)/common.c $(PKG_LIBS) -lm
+	cc $(TEST_FLAGS) -o /tmp/cr_t_vretry tests/test_vfs_retry.c $(SRCDIR)/vfs_http.c $(SRCDIR)/common.c $(PKG_LIBS) -lm
+	cc $(TEST_FLAGS) -o /tmp/cr_t_arhttp tests/test_archive_http.c $(TEST_CORE) $(PKG_LIBS) -lm
+	/tmp/cr_t_common
+	/tmp/cr_t_cfg
+	/tmp/cr_t_usb
+	/tmp/cr_t_nav
+	/tmp/cr_t_dav
+	/tmp/cr_t_html
+	tests/run_http_list.sh    /tmp/cr_t_hlist
+	tests/run_http_fetch.sh   /tmp/cr_t_hfetch
+	tests/run_vfs.sh          /tmp/cr_t_vfs
+	tests/run_vfs.sh          /tmp/cr_t_vcache
+	tests/run_vfs_faults.sh   /tmp/cr_t_vretry
+	tests/run_archive_http.sh /tmp/cr_t_arhttp
+	@test -z "$(FILE)" || cc $(TEST_FLAGS) -o /tmp/cr_t_archive tests/test_archive.c $(TEST_CORE) $(PKG_LIBS) -lm
+	@test -z "$(FILE)" || cc $(TEST_FLAGS) -o /tmp/cr_t_cache tests/test_cache.c $(SRCDIR)/ui.c $(SRCDIR)/cache.c $(SRCDIR)/doc_pdf.c $(TEST_CORE) $(PKG_LIBS) -lm
+	@test -z "$(FILE)" || /tmp/cr_t_archive "$(FILE)"
+	@test -z "$(FILE)" || SDL_VIDEODRIVER=dummy /tmp/cr_t_cache "$(FILE)"
+	@echo "== svi testovi prosli =="
 
 clean:
 	rm -rf $(BUILD) $(TARGET) comicreader
 
-.PHONY: host test clean
+.PHONY: host test clean hostdeps
 
 # ======================================================================
 # PS5 build
