@@ -10,6 +10,10 @@ comicreader
 src/stb_image.h
 src/font8x8_basic.h
 
+# Korisnikov splash - stoji uz eboot.elf na konzoli, odnosno u $CR_ROOT pri
+# host testiranju; nije dio aplikacije
+splash.png
+
 # Privremeno
 *.tmp
 *.log

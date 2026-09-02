@@ -38,8 +38,13 @@ typedef struct {
 void library_reset(library_t *l);
 int  library_add_source(library_t *l, source_t *s);
 
-/* USB slotovi + config -> izvori -> korijen. Vraca broj izvora. */
-int  library_init(library_t *l);
+/* Javljanje faze prije nego sto zapocne - splash ekran je jedini korisnik,
+ * a ovako library.c ostaje bez veze s crtanjem. */
+typedef void (*lib_progress_fn)(void *ud, const char *msg);
+
+/* USB slotovi + config -> izvori -> korijen. Vraca broj izvora.
+ * `cb` smije biti NULL. */
+int  library_init(library_t *l, lib_progress_fn cb, void *ud);
 void library_free(library_t *l);
 
 int  library_enter(library_t *l, int index);   /*  0 ok, -1 odbijeno */

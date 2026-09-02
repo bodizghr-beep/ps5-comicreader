@@ -68,6 +68,17 @@ static source_t *fake_new(const char *name)
     return s;
 }
 
+/* Splash trazi da library_init najavi fazu prije nego sto je zapocne. */
+static const char *prog_msgs[8];
+static int         n_prog;
+
+static void rec_progress(void *ud, const char *msg)
+{
+    assert(ud == &n_prog);
+    if (n_prog < 8)
+        prog_msgs[n_prog++] = msg;
+}
+
 int main(void)
 {
     library_t l;
@@ -123,6 +134,21 @@ int main(void)
     assert(library_back(&l) == 0);          /* korijen: nema kuda dalje */
 
     library_free(&l);
+
+    /* library_init javlja faze splash ekranu: prvo USB, pa podesavanja. */
+    setenv("CR_ROOT", "/nema/ovakvog/foldera", 1);
+
+    library_t l2;
+    library_init(&l2, rec_progress, &n_prog);
+    assert(n_prog == 2);
+    assert(strstr(prog_msgs[0], "USB"));
+    assert(strstr(prog_msgs[1], "podesavanja"));
+    library_free(&l2);
+
+    /* Bez callbacka mora raditi isto - splash je opcion. */
+    library_init(&l2, NULL, NULL);
+    library_free(&l2);
+
     printf("test_nav OK\n");
     return 0;
 }

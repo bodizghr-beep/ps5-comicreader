@@ -13,6 +13,15 @@ typedef struct {
     int           screen_w, screen_h;
 } ui_t;
 
+/* Paleta. Jedno mjesto za sve ekrane - browser, citac i splash. */
+extern const SDL_Color COL_BG;
+extern const SDL_Color COL_PANEL;
+extern const SDL_Color COL_SEL;
+extern const SDL_Color COL_TEXT;
+extern const SDL_Color COL_DIM;
+extern const SDL_Color COL_ACCENT;
+extern const SDL_Color COL_HUD;
+
 int  ui_init(ui_t *ui, SDL_Renderer *r, int w, int h);
 void ui_shutdown(ui_t *ui);
 

@@ -147,9 +147,12 @@ void library_breadcrumb(const library_t *l, char *buf, size_t len)
     }
 }
 
-int library_init(library_t *l)
+int library_init(library_t *l, lib_progress_fn cb, void *ud)
 {
     library_reset(l);
+
+    if (cb)
+        cb(ud, "Skeniram USB...");
 
     /* Host build: CR_ROOT zamjenjuje /mnt/usbN. */
     const char *ovr = getenv("CR_ROOT");
@@ -169,6 +172,9 @@ int library_init(library_t *l)
             library_add_source(l, source_usb_new(p));
         }
     }
+
+    if (cb)
+        cb(ud, "Citam podesavanja...");
 
     char     cpath[LIB_PATH_MAX];
     config_t cfg;

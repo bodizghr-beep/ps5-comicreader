@@ -13,6 +13,14 @@
 #define ATLAS_COLS 16
 #define ATLAS_ROWS 8
 
+const SDL_Color COL_BG     = {  18,  18,  20, 255 };
+const SDL_Color COL_PANEL  = {  30,  30,  34, 255 };
+const SDL_Color COL_SEL    = {  56,  92, 148, 255 };
+const SDL_Color COL_TEXT   = { 232, 232, 236, 255 };
+const SDL_Color COL_DIM    = { 140, 140, 148, 255 };
+const SDL_Color COL_ACCENT = { 120, 176, 255, 255 };
+const SDL_Color COL_HUD    = {   0,   0,   0, 170 };
+
 int ui_init(ui_t *ui, SDL_Renderer *r, int w, int h)
 {
     memset(ui, 0, sizeof(*ui));

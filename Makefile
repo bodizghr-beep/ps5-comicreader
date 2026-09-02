@@ -24,6 +24,7 @@ SRCS := \
 	$(SRCDIR)/main.c \
 	$(SRCDIR)/common.c \
 	$(SRCDIR)/ui.c \
+	$(SRCDIR)/splash.c \
 	$(SRCDIR)/library.c \
 	$(SRCDIR)/config.c \
 	$(SRCDIR)/source.c \

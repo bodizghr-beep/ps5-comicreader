@@ -1,6 +1,6 @@
 /* main.c - PS5 Comic Reader
  *
- * Payload ulazna tacka. Redosled: SDL -> prozor -> skener USB-a -> petlja.
+ * Payload ulazna tacka. Redosled: SDL -> prozor -> splash + skener USB-a -> petlja.
  */
 #include <SDL2/SDL.h>
 #include <curl/curl.h>
@@ -9,6 +9,7 @@
 #include "ui.h"
 #include "library.h"
 #include "cache.h"
+#include "splash.h"
 
 #define ROW_H        44
 #define LIST_TOP     120
@@ -19,14 +20,6 @@
 
 typedef enum { SCREEN_BROWSER, SCREEN_READER, SCREEN_FETCH } screen_t;
 typedef enum { FIT_SCREEN, FIT_WIDTH, FIT_HEIGHT, FIT_COUNT } fitmode_t;
-
-static const SDL_Color COL_BG     = {  18,  18,  20, 255 };
-static const SDL_Color COL_PANEL  = {  30,  30,  34, 255 };
-static const SDL_Color COL_SEL    = {  56,  92, 148, 255 };
-static const SDL_Color COL_TEXT   = { 232, 232, 236, 255 };
-static const SDL_Color COL_DIM    = { 140, 140, 148, 255 };
-static const SDL_Color COL_ACCENT = { 120, 176, 255, 255 };
-static const SDL_Color COL_HUD    = {   0,   0,   0, 170 };
 
 /* Posao preuzimanja. Zivi u app_t, a nit ga puni preko atomika. */
 typedef struct {
@@ -557,6 +550,13 @@ static void poll_analog(app_t *a, SDL_GameController *gc, float dt)
 
 /* ------------------------------------------------------------------ */
 
+/* library_init javlja fazu prije nego sto je zapocne; svaka poruka je jedan
+ * frejm splash ekrana. Faze su sinhrone, pa se crta odavde a ne iz petlje. */
+static void splash_progress(void *ud, const char *msg)
+{
+    splash_step((splash_t *)ud, msg);
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -629,8 +629,18 @@ int main(int argc, char **argv)
     }
     a.rows_visible = (sh - LIST_TOP - 100) / ROW_H;
 
-    library_init(&a.lib);
+    /* Od ovog trenutka ekran nije crn. Sve prije njega - SDL_Init, prozor,
+     * renderer - se ne moze pokriti, jer nema cime da se crta. */
+    splash_t sp;
+    splash_init(&sp, &a.ui);
+
+    library_init(&a.lib, splash_progress, &sp);
+
+    splash_step(&sp, "Ucitavam zapamcene stranice...");
     state_load(&a.lib);
+
+    splash_hold(&sp);
+    splash_free(&sp);
 
     SDL_GameController *gc = NULL;
     for (int i = 0; i < SDL_NumJoysticks(); i++) {

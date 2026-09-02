@@ -22,7 +22,8 @@ tačna struktura direktorija su u `SETUP.md`.
 
 ```
 main.c        petlja, unos sa kontrolera, tri ekrana (lista / čitač / preuzimanje)
-ui.c          8x8 bitmap font, crtanje
+ui.c          8x8 bitmap font, paleta, crtanje
+splash.c      startni ekran dok teku skeniranje USB-a i čitanje configa
 library.c     navigacijski stek kroz foldere, pamćenje pozicije čitanja
 config.c      .ps5cr.conf sa USB-a
 source.h      interfejs izvora
@@ -130,6 +131,20 @@ u `.ps5cr_state`.
 Arhive se čitaju direktno preko mreže. PDF i serveri bez `Range` podrške idu kroz pun
 download u `/data/tmp/ps5cr/`, uz progres, otkazivanje Krugom i nastavak prekinutog
 preuzimanja. Keš je ograničen na manje od `cache_mb` i četvrtine slobodnog prostora.
+
+## Splash ekran
+
+Dok teku skeniranje USB-a i čitanje configa stoji splash sa imenom, verzijom i porukom
+o tome šta se trenutno radi. Gasi se čim je lista spremna, ali ne prije 3.5 s od starta —
+bez tog minimuma brz start ga pokaže kao treptaj. Ako učitavanje traje duže, ne čeka se
+ništa dodatno.
+
+Ako u `/data/homebrew/ComicReader/` postoji `splash.png`, crta se on umjesto imena i
+verzije: uklopljen u ekran uz čuvanje odnosa stranica, sa porukom o fazi na
+poluprovidnoj traci pri dnu. Neispravna ili nepostojeća slika tiho vraća nacrtanu
+varijantu. Na host build-u se traži u `$CR_ROOT/splash.png`.
+
+Crn ekran prije `SDL_CreateRenderer` se ne može pokriti — do tada nema čime da se crta.
 
 ## Kontrole
 
