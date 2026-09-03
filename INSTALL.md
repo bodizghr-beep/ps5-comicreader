@@ -3,10 +3,6 @@
 Za nekoga ko ima jailbreak-ovan PS5 i samo hoće da čita stripove. Bez build-a,
 bez razvojnog okruženja. Za build vidi [`SETUP.md`](SETUP.md).
 
-> **Izdanje još ne postoji.** Linkovi na `releases/latest` niže neće raditi dok
-> se prvo izdanje ne objavi. Do tada `eboot.elf` moraš napraviti sam — vidi
-> `SETUP.md`.
-
 **Šta je provjereno:** koraci 2, 3 i 4.2 su izvršeni i izmjereni na živoj
 konzoli. Koraci 1 i 4.1 su preuzeti iz `SETUP.md` — testirani na PS5 firmware
 10.01 sa Y2JB autoloader-om i etaHEN-om, ali traže fizički pristup konzoli pa
@@ -22,16 +18,14 @@ provjeravano.
 - DualSense kontroler — bez njega se aplikacija pokrene, ali se ne može voditi
 - IP adresa konzole (Settings → Network → View Connection Status)
 
-Iz izdanja skini dva fajla:
+Iz izdanja skini `eboot.elf` — to je cijela aplikacija, jedan fajl:
 
 ```
 https://github.com/bodizghr-beep/ps5-comicreader/releases/latest
 ```
 
-| fajl | šta je |
-|---|---|
-| `eboot.elf` | sama aplikacija |
-| `icon0.png` | ikona za meni, 512x512 PNG |
+Ikone (`sce_sys/icon0.png`) u izdanju nema i ne treba ti — aplikacija radi i bez
+nje, samo se u Homebrew Loader-u pojavi bez slike.
 
 U uputstvu niže zamijeni `<ip-konzole>` stvarnom adresom.
 
@@ -58,7 +52,7 @@ Mora ispisati `200`. Ako ne odgovara, aplikacija se ne može pokrenuti.
 
 ---
 
-## 2. Prenos fajlova
+## 2. Prenos fajla
 
 > **Prenos mora biti binaran.** FTP u tekstualnom modu zamijeni svaki `0x00`
 > bajt razmakom. ELF i dalje izgleda kao ELF, ali padne prije nego što se išta
@@ -69,14 +63,12 @@ Mora ispisati `200`. Ako ne odgovara, aplikacija se ne može pokrenuti.
 
 ```bash
 curl -T eboot.elf  ftp://<ip-konzole>:1337/data/homebrew/ComicReader/eboot.elf
-curl -T icon0.png  ftp://<ip-konzole>:1337/data/homebrew/ComicReader/sce_sys/icon0.png
 ```
 
 **Windows (PowerShell ili cmd):**
 
 ```powershell
 curl.exe -T eboot.elf  ftp://<ip-konzole>:1337/data/homebrew/ComicReader/eboot.elf
-curl.exe -T icon0.png  ftp://<ip-konzole>:1337/data/homebrew/ComicReader/sce_sys/icon0.png
 ```
 
 Očekivana brzina je oko 5 MB/s po žičanoj mreži, dakle nekoliko sekundi za
@@ -85,7 +77,6 @@ Očekivana brzina je oko 5 MB/s po žičanoj mreži, dakle nekoliko sekundi za
 ```
 /data/homebrew/ComicReader/
     eboot.elf
-    sce_sys/icon0.png
 ```
 
 ---
